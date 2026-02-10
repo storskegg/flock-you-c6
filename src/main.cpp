@@ -10,9 +10,33 @@
 #define BLE_SCAN_DURATION 2      // seconds per scan
 #define BLE_SCAN_INTERVAL 3000   // ms between scans
 
+// #define ANTENNA_USE_INTERNAL 1
+#define ANTENNA_USE_EXTERNAL 1
+
+#if !defined(ANTENNA_USE_INTERNAL) && !defined(ANTENNA_USE_EXTERNAL)
+    #define ANTENNA_USE_INTERNAL 1
+#endif
+
+#if defined(ANTENNA_USE_INTERNAL) && defined(ANTENNA_USE_EXTERNAL)
+    #error You must select INTERNAL or EXTERNAL antenna, not both
+#endif
+
 static NimBLEScan* fyBLEScan = NULL;
 static unsigned long fyLastBleScan = 0;
 
+void cfg_antenna(void) {
+#ifdef ANTENNA_USE_INTERNAL
+    pinMode(WIFI_ENABLE, OUTPUT);
+    digitalWrite(WIFI_ENABLE, LOW);
+    pinMode(WIFI_ANT_CONFIG, OUTPUT);
+    digitalWrite(WIFI_ANT_CONFIG, LOW);
+#elifdef ANTENNA_USE_EXTERNAL
+    pinMode(WIFI_ENABLE, OUTPUT);
+    digitalWrite(WIFI_ENABLE, LOW);
+    pinMode(WIFI_ANT_CONFIG, OUTPUT);
+    digitalWrite(WIFI_ANT_CONFIG, HIGH);
+#endif
+}
 
 static std::string getUUID(const NimBLEAdvertisedDevice* device) {
     if (!device || !device->haveServiceUUID()) return "[]";
@@ -62,6 +86,9 @@ class FYBLECallbacks : public NimBLEScanCallbacks {
 } scanCallbacks;
 
 void setup() {
+    pinMode(LED_BUILTIN, OUTPUT);
+    cfg_antenna();
+
     Serial.begin(115200);
     delay(500);
     Serial.println("Scanning...");
@@ -82,6 +109,12 @@ void setup() {
 
 void loop() {
     // BLE scanning cycle
+    if (fyBLEScan->isScanning()) {
+        digitalWrite(LED_BUILTIN, HIGH);
+    } else {
+        digitalWrite(LED_BUILTIN, LOW);
+    }
+
     if (millis() - fyLastBleScan >= BLE_SCAN_INTERVAL && !fyBLEScan->isScanning()) {
         fyBLEScan->start(BLE_SCAN_DURATION, false);
         fyLastBleScan = millis();
