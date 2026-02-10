@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -14,7 +15,26 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
+	"go.bug.st/serial"
 )
+
+// Column width constants for TUI table
+const (
+	colWidthMAC     = 20
+	colWidthRSSI    = 8
+	colWidthName    = 30
+	colWidthMfrCode = 10
+	colPadding      = 4 // Total padding between columns
+)
+
+// Refresh rate for TUI
+const refreshInterval = 250 * time.Millisecond
+
+// RSSI threshold for near/far device separation
+const nearDeviceRssiLimit = -75
+
+// Special manufacturer code for bottom table display
+const specialMfrCode = 76 // Apple Inc.
 
 // Message represents both notification and BLE device messages
 type Message struct {
@@ -22,7 +42,7 @@ type Message struct {
 	Protocol     string   `json:"protocol,omitempty"`
 	MacAddress   string   `json:"mac_address,omitempty"`
 	RSSI         int      `json:"rssi,omitempty"`
-	MfrCode      string   `json:"mfr_code,omitempty"`
+	MfrCode      int      `json:"mfr_code,omitempty"`
 	DeviceName   string   `json:"device_name,omitempty"`
 	ServiceUUIDs []string `json:"service_uuids,omitempty"`
 }
@@ -32,7 +52,7 @@ type BLEDevice struct {
 	MacAddress   string
 	RSSI         int
 	DeviceName   string
-	MfrCode      string
+	MfrCode      int
 	ServiceUUIDs []string
 }
 
@@ -50,8 +70,37 @@ func NewAggregator() *Aggregator {
 
 func (a *Aggregator) AddOrUpdate(device *BLEDevice) {
 	a.mu.Lock()
-	a.devices[device.MacAddress] = device
-	a.mu.Unlock()
+	defer a.mu.Unlock()
+
+	existing, exists := a.devices[device.MacAddress]
+	if !exists {
+		// New device, just add it
+		a.devices[device.MacAddress] = device
+		return
+	}
+
+	// Device exists, apply update rules for each field:
+	// - If existing field is empty, update it
+	// - If existing field is not empty and new field is not empty, update it
+	// - If existing field is not empty and new field is empty, keep existing
+
+	// Update RSSI (always update, it's an int)
+	existing.RSSI = device.RSSI
+
+	// Update DeviceName
+	if existing.DeviceName == "" || device.DeviceName != "" {
+		existing.DeviceName = device.DeviceName
+	}
+
+	// Update MfrCode (always update if non-zero)
+	if existing.MfrCode == 0 || device.MfrCode != 0 {
+		existing.MfrCode = device.MfrCode
+	}
+
+	// Update ServiceUUIDs
+	if len(existing.ServiceUUIDs) == 0 || len(device.ServiceUUIDs) > 0 {
+		existing.ServiceUUIDs = device.ServiceUUIDs
+	}
 }
 
 func (a *Aggregator) GetSorted() []*BLEDevice {
@@ -146,23 +195,38 @@ func readSerial(reader io.Reader, agg *Aggregator, paused *bool, pauseMu *sync.R
 	}
 }
 
-// drawTable renders the table to the screen
+// drawTable renders near devices, far devices, and special manufacturer tables to the screen
 func drawTable(s tcell.Screen, devices []*BLEDevice, paused bool) {
 	s.Clear()
 	width, height := s.Size()
 
-	// Draw header
-	headerStyle := tcell.StyleDefault.Bold(true).Background(tcell.ColorNavy).Foreground(tcell.ColorWhite)
-	headers := []string{"MAC Address", "RSSI", "Device Name", "Mfr Code", "Service UUIDs"}
-	colWidths := []int{17, 6, 20, 10, width - 17 - 6 - 20 - 10 - 4}
-
-	col := 0
-	for i, header := range headers {
-		drawText(s, col, 0, colWidths[i], headerStyle, header)
-		col += colWidths[i]
+	// Calculate column widths using constants
+	colWidths := []int{
+		colWidthMAC,
+		colWidthRSSI,
+		colWidthName,
+		colWidthMfrCode,
+		width - colWidthMAC - colWidthRSSI - colWidthName - colWidthMfrCode - colPadding,
 	}
 
-	// Draw status line
+	// Split devices into near, far, and special manufacturer
+	var nearDevices, farDevices []*BLEDevice
+	var specialMfrMACs []string
+
+	for _, dev := range devices {
+		if dev.MfrCode == specialMfrCode {
+			specialMfrMACs = append(specialMfrMACs, dev.MacAddress)
+		} else if dev.RSSI >= nearDeviceRssiLimit {
+			nearDevices = append(nearDevices, dev)
+		} else {
+			farDevices = append(farDevices, dev)
+		}
+	}
+
+	// Sort special manufacturer MAC addresses alphabetically
+	sort.Strings(specialMfrMACs)
+
+	// Draw status line at bottom
 	statusStyle := tcell.StyleDefault.Background(tcell.ColorDarkSlateGray).Foreground(tcell.ColorWhite)
 	statusText := "q: Quit | e: Export | p: Pause/Resume"
 	if paused {
@@ -170,12 +234,85 @@ func drawTable(s tcell.Screen, devices []*BLEDevice, paused bool) {
 	}
 	drawText(s, 0, height-1, width, statusStyle, statusText)
 
+	// Reserve space for special manufacturer table (3 lines: title, header, data row)
+	specialTableHeight := 3
+
+	// Calculate available height for near/far tables (minus status line and special table)
+	availableHeight := height - 1 - specialTableHeight
+
+	// Split 50-50, with far devices getting -1 row if odd height
+	nearTableHeight := availableHeight / 2
+	if availableHeight%2 == 1 {
+		nearTableHeight = (availableHeight / 2) + 1
+	}
+
+	// Draw near devices table
+	row := 0
+	row = drawDeviceTable(s, nearDevices, colWidths, "NEAR DEVICES", row, nearTableHeight)
+
+	// Draw far devices table
+	row = drawDeviceTable(s, farDevices, colWidths, "FAR DEVICES", row, availableHeight)
+
+	// Draw special manufacturer table at the bottom (just above status line)
+	drawSpecialMfrTable(s, specialMfrMACs, row, height-1)
+
+	s.Show()
+}
+
+// drawSpecialMfrTable renders the special manufacturer code table
+func drawSpecialMfrTable(s tcell.Screen, macAddresses []string, startRow int, maxRow int) {
+	width, _ := s.Size()
+
+	// Draw table title
+	titleStyle := tcell.StyleDefault.Bold(true).Background(tcell.ColorDarkGreen).Foreground(tcell.ColorWhite)
+	drawText(s, 0, startRow, width, titleStyle, fmt.Sprintf(" MFR CODE %d ", specialMfrCode))
+	startRow++
+
+	// Draw header
+	headerStyle := tcell.StyleDefault.Bold(true).Background(tcell.ColorNavy).Foreground(tcell.ColorWhite)
+	mfrCodeColWidth := 15
+	macListColWidth := width - mfrCodeColWidth
+
+	drawText(s, 0, startRow, mfrCodeColWidth, headerStyle, "Mfr Code")
+	drawText(s, mfrCodeColWidth, startRow, macListColWidth, headerStyle, "MAC Addresses")
+	startRow++
+
+	// Draw data row
+	normalStyle := tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorBlack)
+
+	// Join MAC addresses with comma separation
+	macList := strings.Join(macAddresses, ", ")
+
+	drawText(s, 0, startRow, mfrCodeColWidth, normalStyle, fmt.Sprintf("%d", specialMfrCode))
+	drawText(s, mfrCodeColWidth, startRow, macListColWidth, normalStyle, macList)
+}
+
+// drawDeviceTable renders a single device table with the given title
+func drawDeviceTable(s tcell.Screen, devices []*BLEDevice, colWidths []int, title string, startRow int, maxRow int) int {
+	width, _ := s.Size()
+
+	// Draw table title
+	titleStyle := tcell.StyleDefault.Bold(true).Background(tcell.ColorDarkGreen).Foreground(tcell.ColorWhite)
+	drawText(s, 0, startRow, width, titleStyle, fmt.Sprintf(" %s ", title))
+	startRow++
+
+	// Draw header
+	headerStyle := tcell.StyleDefault.Bold(true).Background(tcell.ColorNavy).Foreground(tcell.ColorWhite)
+	headers := []string{"MAC Address", "RSSI", "Device Name", "Mfr Code", "Service UUIDs"}
+
+	col := 0
+	for i, header := range headers {
+		drawText(s, col, startRow, colWidths[i], headerStyle, header)
+		col += colWidths[i]
+	}
+	startRow++
+
 	// Draw devices
-	row := 1
+	row := startRow
 	normalStyle := tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorBlack)
 
 	for _, dev := range devices {
-		if row >= height-1 {
+		if row >= maxRow {
 			break
 		}
 
@@ -194,26 +331,35 @@ func drawTable(s tcell.Screen, devices []*BLEDevice, paused bool) {
 		// Draw device name
 		drawText(s, colWidths[0]+colWidths[1], row, colWidths[2], normalStyle, dev.DeviceName)
 
-		// Draw Mfr Code
-		drawText(s, colWidths[0]+colWidths[1]+colWidths[2], row, colWidths[3], normalStyle, dev.MfrCode)
+		// Draw Mfr Code (as integer)
+		mfrCodeStr := ""
+		if dev.MfrCode != 0 {
+			mfrCodeStr = fmt.Sprintf("%d", dev.MfrCode)
+		}
+		drawText(s, colWidths[0]+colWidths[1]+colWidths[2], row, colWidths[3], normalStyle, mfrCodeStr)
 
-		// Draw service UUIDs (multi-line)
+		// Draw service UUIDs (multi-line with ellipsis support)
 		uuidCol := colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3]
 		if len(dev.ServiceUUIDs) == 0 {
 			drawText(s, uuidCol, row, colWidths[4], normalStyle, "")
 		} else {
 			for i, uuid := range dev.ServiceUUIDs {
-				if row+i >= height-1 {
+				if row+i >= maxRow {
 					break
 				}
-				drawText(s, uuidCol, row+i, colWidths[4], normalStyle, uuid)
+				// Ellipsize if UUID is longer than column width
+				displayUUID := uuid
+				if len(uuid) > colWidths[4] && colWidths[4] > 3 {
+					displayUUID = uuid[:colWidths[4]-3] + "..."
+				}
+				drawText(s, uuidCol, row+i, colWidths[4], normalStyle, displayUUID)
 			}
 		}
 
 		row += uuidLines
 	}
 
-	s.Show()
+	return row
 }
 
 // drawText draws text at a specific position
@@ -228,6 +374,11 @@ func drawText(s tcell.Screen, x, y, width int, style tcell.Style, text string) {
 }
 
 func main() {
+	// Command-line flags
+	serialPort := flag.String("port", "", "Serial port device (e.g., /dev/ttyUSB0). If not specified, reads from stdin.")
+	baudRate := flag.Int("baud", 115200, "Baud rate for serial port (default: 115200)")
+	flag.Parse()
+
 	// Initialize aggregator
 	agg := NewAggregator()
 
@@ -238,8 +389,30 @@ func main() {
 	// Done channel for graceful shutdown
 	done := make(chan struct{})
 
-	// Start reading from stdin (serial input)
-	go readSerial(os.Stdin, agg, &paused, &pauseMu, done)
+	// Determine input source
+	var reader io.ReadCloser
+	if *serialPort != "" {
+		// Open serial port
+		mode := &serial.Mode{
+			BaudRate: *baudRate,
+			DataBits: 8,
+			Parity:   serial.NoParity,
+			StopBits: serial.OneStopBit,
+		}
+		port, err := serial.Open(*serialPort, mode)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error opening serial port %s: %v\n", *serialPort, err)
+			os.Exit(1)
+		}
+		reader = port
+		defer port.Close()
+	} else {
+		// Use stdin
+		reader = os.Stdin
+	}
+
+	// Start reading from input source
+	go readSerial(reader, agg, &paused, &pauseMu, done)
 
 	// Initialize screen
 	s, err := tcell.NewScreen()
@@ -260,7 +433,7 @@ func main() {
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	// Ticker for refresh
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(refreshInterval)
 	defer ticker.Stop()
 
 	// Initial draw
