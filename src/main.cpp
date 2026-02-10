@@ -2,9 +2,9 @@
 #include <NimBLEDevice.h>
 #include <NimBLEAdvertisedDevice.h>
 #include "NimBLEEddystoneTLM.h"
-#include "NimBLEBeacon.h"
+// #include "NimBLEBeacon.h"
 
-#define ENDIAN_CHANGE_U16(x) ((((x) & 0xFF00) >> 8) + (((x) & 0xFF) << 8))
+// #define ENDIAN_CHANGE_U16(x) ((((x) & 0xFF00) >> 8) + (((x) & 0xFF) << 8))
 
 // BLE scanning
 #define BLE_SCAN_DURATION 5      // seconds per scan
