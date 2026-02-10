@@ -37,6 +37,13 @@ const nearDeviceRssiLimit = -75
 // Special manufacturer code for bottom table display
 const specialMfrCode = 76 // Apple Inc.
 
+// TableState tracks scrolling and focus state for the tables
+type TableState struct {
+	nearScrollOffset int
+	farScrollOffset  int
+	focusedTable     string // "near" or "far"
+}
+
 // Message represents both notification and BLE device messages
 type Message struct {
 	Notification *string  `json:"notification,omitempty"`
@@ -142,6 +149,12 @@ func (a *Aggregator) ExportJSON(filename string) error {
 	return encoder.Encode(devices)
 }
 
+func (a *Aggregator) Clear() {
+	a.mu.Lock()
+	a.devices = make(map[string]*BLEDevice)
+	a.mu.Unlock()
+}
+
 // processSerialLine processes a single line of JSON
 func processSerialLine(line string, agg *Aggregator, paused *bool, pauseMu *sync.RWMutex) {
 	// Check if paused
@@ -205,7 +218,7 @@ func readSerial(reader io.Reader, agg *Aggregator, paused *bool, pauseMu *sync.R
 }
 
 // drawTable renders near devices, far devices, and special manufacturer tables to the screen
-func drawTable(s tcell.Screen, devices []*BLEDevice, paused bool) {
+func drawTable(s tcell.Screen, devices []*BLEDevice, paused bool, state *TableState) {
 	s.Clear()
 	width, height := s.Size()
 
@@ -236,14 +249,6 @@ func drawTable(s tcell.Screen, devices []*BLEDevice, paused bool) {
 	// Sort special manufacturer MAC addresses alphabetically
 	sort.Strings(specialMfrMACs)
 
-	// Draw status line at bottom
-	statusStyle := tcell.StyleDefault.Background(tcell.ColorDarkSlateGray).Foreground(tcell.ColorWhite)
-	statusText := "q: Quit | e: Export | p: Pause/Resume"
-	if paused {
-		statusText += " | [PAUSED]"
-	}
-	drawText(s, 0, height-1, width, statusStyle, statusText)
-
 	// Calculate special table height (title + header + wrapped MAC address rows)
 	mfrCodeColWidth := 15
 	macListColWidth := width - mfrCodeColWidth
@@ -260,12 +265,34 @@ func drawTable(s tcell.Screen, devices []*BLEDevice, paused bool) {
 		nearTableHeight = (availableHeight / 2) + 1
 	}
 
+	// Draw status line at bottom (moved here so we have access to nearTableHeight and availableHeight)
+	statusStyle := tcell.StyleDefault.Background(tcell.ColorDarkSlateGray).Foreground(tcell.ColorWhite)
+	statusText := "q: Quit | e: Export | c: Clear | p: Pause | ↑↓/jk: Scroll | Tab: Switch | PgUp/PgDn/Home/End"
+	if paused {
+		statusText += " | [PAUSED]"
+	}
+	// Add focus indicator and scroll position
+	if state.focusedTable == "near" {
+		statusText += fmt.Sprintf(" | Focus: NEAR (row %d-%d of %d)",
+			state.nearScrollOffset+1,
+			min(state.nearScrollOffset+nearTableHeight-2, len(nearDevices)),
+			len(nearDevices))
+	} else {
+		statusText += fmt.Sprintf(" | Focus: FAR (row %d-%d of %d)",
+			state.farScrollOffset+1,
+			min(state.farScrollOffset+(availableHeight-nearTableHeight)-2, len(farDevices)),
+			len(farDevices))
+	}
+	drawText(s, 0, height-1, width, statusStyle, statusText)
+
 	// Draw near devices table
 	row := 0
-	row = drawDeviceTable(s, nearDevices, colWidths, "NEAR DEVICES", row, nearTableHeight)
+	isFocused := state.focusedTable == "near"
+	row = drawDeviceTable(s, nearDevices, colWidths, "NEAR DEVICES", row, nearTableHeight, state.nearScrollOffset, isFocused)
 
 	// Draw far devices table
-	row = drawDeviceTable(s, farDevices, colWidths, "FAR DEVICES", row, availableHeight)
+	isFocused = state.focusedTable == "far"
+	row = drawDeviceTable(s, farDevices, colWidths, "FAR DEVICES", row, availableHeight, state.farScrollOffset, isFocused)
 
 	// Draw special manufacturer table at the bottom (just above status line)
 	drawSpecialMfrTable(s, specialMfrMACs, row, height-1)
@@ -351,12 +378,22 @@ func wordWrapMACs(text string, maxWidth int) []string {
 }
 
 // drawDeviceTable renders a single device table with the given title
-func drawDeviceTable(s tcell.Screen, devices []*BLEDevice, colWidths []int, title string, startRow int, maxRow int) int {
+func drawDeviceTable(s tcell.Screen, devices []*BLEDevice, colWidths []int, title string, startRow int, maxRow int, scrollOffset int, isFocused bool) int {
 	width, _ := s.Size()
 
-	// Draw table title
-	titleStyle := tcell.StyleDefault.Bold(true).Background(tcell.ColorDarkGreen).Foreground(tcell.ColorWhite)
-	drawText(s, 0, startRow, width, titleStyle, fmt.Sprintf(" %s ", title))
+	// Draw table title with focus indicator
+	titleStyle := tcell.StyleDefault.Bold(true).Foreground(tcell.ColorWhite)
+	if isFocused {
+		titleStyle = titleStyle.Background(tcell.ColorDarkGreen)
+	} else {
+		titleStyle = titleStyle.Background(tcell.ColorDarkSlateGray)
+	}
+
+	titleText := fmt.Sprintf(" %s ", title)
+	if isFocused {
+		titleText += "◀ FOCUSED"
+	}
+	drawText(s, 0, startRow, width, titleStyle, titleText)
 	startRow++
 
 	// Draw header
@@ -370,19 +407,34 @@ func drawDeviceTable(s tcell.Screen, devices []*BLEDevice, colWidths []int, titl
 	}
 	startRow++
 
-	// Draw devices
+	// Calculate available rows for data
+	availableRows := maxRow - startRow
+
+	// Clamp scroll offset
+	maxScroll := len(devices)
+	if scrollOffset < 0 {
+		scrollOffset = 0
+	}
+	if scrollOffset >= maxScroll {
+		scrollOffset = max(0, maxScroll-1)
+	}
+
+	// Draw devices starting from scrollOffset
 	row := startRow
 	normalStyle := tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorBlack)
 
-	for _, dev := range devices {
-		if row >= maxRow {
-			break
-		}
+	for i := scrollOffset; i < len(devices) && row < maxRow; i++ {
+		dev := devices[i]
 
 		// Calculate number of lines needed for service UUIDs
 		uuidLines := 1
 		if len(dev.ServiceUUIDs) > 1 {
 			uuidLines = len(dev.ServiceUUIDs)
+		}
+
+		// Skip if this device won't fit
+		if row+uuidLines > maxRow {
+			break
 		}
 
 		// Draw Last Seen timestamp (first column)
@@ -410,8 +462,8 @@ func drawDeviceTable(s tcell.Screen, devices []*BLEDevice, colWidths []int, titl
 		if len(dev.ServiceUUIDs) == 0 {
 			drawText(s, uuidCol, row, colWidths[5], normalStyle, "")
 		} else {
-			for i, uuid := range dev.ServiceUUIDs {
-				if row+i >= maxRow {
+			for j, uuid := range dev.ServiceUUIDs {
+				if row+j >= maxRow {
 					break
 				}
 				// Ellipsize if UUID is longer than column width
@@ -419,11 +471,24 @@ func drawDeviceTable(s tcell.Screen, devices []*BLEDevice, colWidths []int, titl
 				if len(uuid) > colWidths[5] && colWidths[5] > 3 {
 					displayUUID = uuid[:colWidths[5]-3] + "..."
 				}
-				drawText(s, uuidCol, row+i, colWidths[5], normalStyle, displayUUID)
+				drawText(s, uuidCol, row+j, colWidths[5], normalStyle, displayUUID)
 			}
 		}
 
 		row += uuidLines
+	}
+
+	// Draw scroll indicators if needed
+	if isFocused && len(devices) > 0 {
+		indicatorStyle := tcell.StyleDefault.Foreground(tcell.ColorYellow).Background(tcell.ColorBlack)
+		if scrollOffset > 0 {
+			// More content above
+			drawText(s, width-10, startRow, 10, indicatorStyle, "▲ MORE ▲")
+		}
+		if scrollOffset+availableRows < len(devices) {
+			// More content below
+			drawText(s, width-10, maxRow-1, 10, indicatorStyle, "▼ MORE ▼")
+		}
 	}
 
 	return row
@@ -438,6 +503,20 @@ func drawText(s tcell.Screen, x, y, width int, style tcell.Style, text string) {
 	for i := len(text); i < width; i++ {
 		s.SetContent(x+i, y, ' ', nil, style)
 	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func main() {
@@ -494,6 +573,14 @@ func main() {
 	defer s.Fini()
 
 	s.SetStyle(tcell.StyleDefault.Background(tcell.ColorBlack).Foreground(tcell.ColorWhite))
+	s.EnableMouse() // Enable mouse support for scrolling
+
+	// Initialize table state
+	tableState := &TableState{
+		nearScrollOffset: 0,
+		farScrollOffset:  0,
+		focusedTable:     "near",
+	}
 
 	// Handle signals
 	sigChan := make(chan os.Signal, 1)
@@ -504,7 +591,7 @@ func main() {
 	defer ticker.Stop()
 
 	// Initial draw
-	drawTable(s, agg.GetSorted(), paused)
+	drawTable(s, agg.GetSorted(), paused, tableState)
 
 	// Event loop
 	quit := false
@@ -514,7 +601,7 @@ func main() {
 			pauseMu.RLock()
 			isPaused := paused
 			pauseMu.RUnlock()
-			drawTable(s, agg.GetSorted(), isPaused)
+			drawTable(s, agg.GetSorted(), isPaused, tableState)
 
 		case <-sigChan:
 			quit = true
@@ -531,23 +618,149 @@ func main() {
 						case 'q', 'Q':
 							quit = true
 						case 'e', 'E':
-							if err := agg.ExportJSON("ble_devices.json"); err != nil {
+							// Export with timestamp in filename
+							timestamp := time.Now().Format("2006-01-02_15-04-05")
+							filename := fmt.Sprintf("ble_devices_%s.json", timestamp)
+							if err := agg.ExportJSON(filename); err != nil {
 								// Could show error in status line, but for now ignore
 							}
+						case 'c', 'C':
+							// Clear the aggregator
+							agg.Clear()
+							// Reset scroll positions
+							tableState.nearScrollOffset = 0
+							tableState.farScrollOffset = 0
+							drawTable(s, agg.GetSorted(), paused, tableState)
 						case 'p', 'P':
 							pauseMu.Lock()
 							paused = !paused
 							pauseMu.Unlock()
+						case 'j', 'J': // Scroll down (vim-style)
+							if tableState.focusedTable == "near" {
+								tableState.nearScrollOffset++
+							} else {
+								tableState.farScrollOffset++
+							}
+							drawTable(s, agg.GetSorted(), paused, tableState)
+						case 'k', 'K': // Scroll up (vim-style)
+							if tableState.focusedTable == "near" {
+								tableState.nearScrollOffset--
+								if tableState.nearScrollOffset < 0 {
+									tableState.nearScrollOffset = 0
+								}
+							} else {
+								tableState.farScrollOffset--
+								if tableState.farScrollOffset < 0 {
+									tableState.farScrollOffset = 0
+								}
+							}
+							drawTable(s, agg.GetSorted(), paused, tableState)
 						}
+					case tcell.KeyUp:
+						if tableState.focusedTable == "near" {
+							tableState.nearScrollOffset--
+							if tableState.nearScrollOffset < 0 {
+								tableState.nearScrollOffset = 0
+							}
+						} else {
+							tableState.farScrollOffset--
+							if tableState.farScrollOffset < 0 {
+								tableState.farScrollOffset = 0
+							}
+						}
+						drawTable(s, agg.GetSorted(), paused, tableState)
+					case tcell.KeyDown:
+						if tableState.focusedTable == "near" {
+							tableState.nearScrollOffset++
+						} else {
+							tableState.farScrollOffset++
+						}
+						drawTable(s, agg.GetSorted(), paused, tableState)
+					case tcell.KeyPgUp:
+						if tableState.focusedTable == "near" {
+							tableState.nearScrollOffset -= 10
+							if tableState.nearScrollOffset < 0 {
+								tableState.nearScrollOffset = 0
+							}
+						} else {
+							tableState.farScrollOffset -= 10
+							if tableState.farScrollOffset < 0 {
+								tableState.farScrollOffset = 0
+							}
+						}
+						drawTable(s, agg.GetSorted(), paused, tableState)
+					case tcell.KeyPgDn:
+						if tableState.focusedTable == "near" {
+							tableState.nearScrollOffset += 10
+						} else {
+							tableState.farScrollOffset += 10
+						}
+						drawTable(s, agg.GetSorted(), paused, tableState)
+					case tcell.KeyHome:
+						if tableState.focusedTable == "near" {
+							tableState.nearScrollOffset = 0
+						} else {
+							tableState.farScrollOffset = 0
+						}
+						drawTable(s, agg.GetSorted(), paused, tableState)
+					case tcell.KeyEnd:
+						devices := agg.GetSorted()
+						if tableState.focusedTable == "near" {
+							tableState.nearScrollOffset = len(devices)
+						} else {
+							tableState.farScrollOffset = len(devices)
+						}
+						drawTable(s, agg.GetSorted(), paused, tableState)
+					case tcell.KeyTab:
+						// Switch focus between tables
+						if tableState.focusedTable == "near" {
+							tableState.focusedTable = "far"
+						} else {
+							tableState.focusedTable = "near"
+						}
+						drawTable(s, agg.GetSorted(), paused, tableState)
 					case tcell.KeyCtrlC:
 						quit = true
+					}
+				case *tcell.EventMouse:
+					// Handle mouse scroll events
+					_, y := ev.Position()
+					buttons := ev.Buttons()
+
+					// Determine which table the mouse is over
+					// (This is a simplified version - you may want to track exact table boundaries)
+					_, height := s.Size()
+					midPoint := (height - 1) / 2
+
+					if buttons&tcell.WheelUp != 0 {
+						// Scroll up
+						if y < midPoint && tableState.focusedTable == "near" {
+							tableState.nearScrollOffset--
+							if tableState.nearScrollOffset < 0 {
+								tableState.nearScrollOffset = 0
+							}
+						} else if y >= midPoint && tableState.focusedTable == "far" {
+							tableState.farScrollOffset--
+							if tableState.farScrollOffset < 0 {
+								tableState.farScrollOffset = 0
+							}
+						}
+						drawTable(s, agg.GetSorted(), paused, tableState)
+					} else if buttons&tcell.WheelDown != 0 {
+						// Scroll down
+						if y < midPoint && tableState.focusedTable == "near" {
+							tableState.nearScrollOffset++
+						} else if y >= midPoint && tableState.focusedTable == "far" {
+							tableState.farScrollOffset++
+						}
+						drawTable(s, agg.GetSorted(), paused, tableState)
 					}
 				case *tcell.EventResize:
 					s.Sync()
 					pauseMu.RLock()
 					isPaused := paused
 					pauseMu.RUnlock()
-					drawTable(s, agg.GetSorted(), isPaused)
+					drawTable(s, agg.GetSorted(), isPaused, tableState)
 				}
 			}
 			time.Sleep(10 * time.Millisecond)
