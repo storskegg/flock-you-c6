@@ -20,11 +20,12 @@ import (
 
 // Column width constants for TUI table
 const (
-	colWidthMAC     = 20
-	colWidthRSSI    = 8
-	colWidthName    = 30
-	colWidthMfrCode = 10
-	colPadding      = 4 // Total padding between columns
+	colWidthLastSeen = 21 // "YYYY-MM-DD hh:mm:ss" + padding
+	colWidthMAC      = 20
+	colWidthRSSI     = 8
+	colWidthName     = 30
+	colWidthMfrCode  = 10
+	colPadding       = 5 // Total padding between columns
 )
 
 // Refresh rate for TUI
@@ -54,6 +55,7 @@ type BLEDevice struct {
 	DeviceName   string
 	MfrCode      int
 	ServiceUUIDs []string
+	LastSeen     time.Time
 }
 
 // Aggregator stores BLE devices indexed by MAC address
@@ -87,6 +89,9 @@ func (a *Aggregator) AddOrUpdate(device *BLEDevice) {
 	// Update RSSI (always update, it's an int)
 	existing.RSSI = device.RSSI
 
+	// Update LastSeen (always update)
+	existing.LastSeen = device.LastSeen
+
 	// Update DeviceName
 	if existing.DeviceName == "" || device.DeviceName != "" {
 		existing.DeviceName = device.DeviceName
@@ -112,9 +117,12 @@ func (a *Aggregator) GetSorted() []*BLEDevice {
 		devices = append(devices, dev)
 	}
 
-	// Sort by MAC address
+	// Sort by LastSeen descending (newest first), then by MAC address ascending
 	sort.Slice(devices, func(i, j int) bool {
-		return devices[i].MacAddress < devices[j].MacAddress
+		if devices[i].LastSeen.Equal(devices[j].LastSeen) {
+			return devices[i].MacAddress < devices[j].MacAddress
+		}
+		return devices[i].LastSeen.After(devices[j].LastSeen)
 	})
 
 	return devices
@@ -165,6 +173,7 @@ func processSerialLine(line string, agg *Aggregator, paused *bool, pauseMu *sync
 			DeviceName:   msg.DeviceName,
 			MfrCode:      msg.MfrCode,
 			ServiceUUIDs: msg.ServiceUUIDs,
+			LastSeen:     time.Now().UTC(),
 		}
 		agg.AddOrUpdate(device)
 	}
@@ -202,11 +211,12 @@ func drawTable(s tcell.Screen, devices []*BLEDevice, paused bool) {
 
 	// Calculate column widths using constants
 	colWidths := []int{
+		colWidthLastSeen,
 		colWidthMAC,
 		colWidthRSSI,
 		colWidthName,
 		colWidthMfrCode,
-		width - colWidthMAC - colWidthRSSI - colWidthName - colWidthMfrCode - colPadding,
+		width - colWidthLastSeen - colWidthMAC - colWidthRSSI - colWidthName - colWidthMfrCode - colPadding,
 	}
 
 	// Split devices into near, far, and special manufacturer
@@ -234,8 +244,12 @@ func drawTable(s tcell.Screen, devices []*BLEDevice, paused bool) {
 	}
 	drawText(s, 0, height-1, width, statusStyle, statusText)
 
-	// Reserve space for special manufacturer table (3 lines: title, header, data row)
-	specialTableHeight := 3
+	// Calculate special table height (title + header + wrapped MAC address rows)
+	mfrCodeColWidth := 15
+	macListColWidth := width - mfrCodeColWidth
+	macList := strings.Join(specialMfrMACs, ", ")
+	wrappedMACLines := wordWrapMACs(macList, macListColWidth)
+	specialTableHeight := 2 + len(wrappedMACLines) // title + header + data rows
 
 	// Calculate available height for near/far tables (minus status line and special table)
 	availableHeight := height - 1 - specialTableHeight
@@ -277,14 +291,63 @@ func drawSpecialMfrTable(s tcell.Screen, macAddresses []string, startRow int, ma
 	drawText(s, mfrCodeColWidth, startRow, macListColWidth, headerStyle, "MAC Addresses")
 	startRow++
 
-	// Draw data row
+	// Draw data rows with word-wrapped MAC addresses
 	normalStyle := tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorBlack)
 
-	// Join MAC addresses with comma separation
-	macList := strings.Join(macAddresses, ", ")
-
+	// Draw Mfr Code in first row only
 	drawText(s, 0, startRow, mfrCodeColWidth, normalStyle, fmt.Sprintf("%d", specialMfrCode))
-	drawText(s, mfrCodeColWidth, startRow, macListColWidth, normalStyle, macList)
+
+	// Word-wrap MAC addresses at comma/whitespace boundaries
+	macList := strings.Join(macAddresses, ", ")
+	wrappedLines := wordWrapMACs(macList, macListColWidth)
+
+	for i, line := range wrappedLines {
+		if startRow+i >= maxRow {
+			break
+		}
+		drawText(s, mfrCodeColWidth, startRow+i, macListColWidth, normalStyle, line)
+	}
+}
+
+// wordWrapMACs wraps a comma-separated list of MAC addresses to fit within maxWidth
+// Only breaks at comma+space boundaries, never in the middle of a MAC address
+func wordWrapMACs(text string, maxWidth int) []string {
+	if len(text) <= maxWidth {
+		return []string{text}
+	}
+
+	var lines []string
+	currentLine := ""
+
+	// Split by ", " to get individual MAC addresses
+	macs := strings.Split(text, ", ")
+
+	for _, mac := range macs {
+		// Check if adding this MAC (with separator if needed) would exceed width
+		testLine := currentLine
+		if currentLine != "" {
+			testLine += ", "
+		}
+		testLine += mac
+
+		if len(testLine) <= maxWidth {
+			// Fits on current line
+			currentLine = testLine
+		} else {
+			// Doesn't fit, start new line
+			if currentLine != "" {
+				lines = append(lines, currentLine)
+			}
+			currentLine = mac
+		}
+	}
+
+	// Add the last line
+	if currentLine != "" {
+		lines = append(lines, currentLine)
+	}
+
+	return lines
 }
 
 // drawDeviceTable renders a single device table with the given title
@@ -298,7 +361,7 @@ func drawDeviceTable(s tcell.Screen, devices []*BLEDevice, colWidths []int, titl
 
 	// Draw header
 	headerStyle := tcell.StyleDefault.Bold(true).Background(tcell.ColorNavy).Foreground(tcell.ColorWhite)
-	headers := []string{"MAC Address", "RSSI", "Device Name", "Mfr Code", "Service UUIDs"}
+	headers := []string{"Last Seen", "MAC Address", "RSSI", "Device Name", "Mfr Code", "Service UUIDs"}
 
 	col := 0
 	for i, header := range headers {
@@ -322,26 +385,30 @@ func drawDeviceTable(s tcell.Screen, devices []*BLEDevice, colWidths []int, titl
 			uuidLines = len(dev.ServiceUUIDs)
 		}
 
+		// Draw Last Seen timestamp (first column)
+		lastSeenStr := dev.LastSeen.Format("2006-01-02 15:04:05")
+		drawText(s, 0, row, colWidths[0], normalStyle, lastSeenStr)
+
 		// Draw MAC address
-		drawText(s, 0, row, colWidths[0], normalStyle, dev.MacAddress)
+		drawText(s, colWidths[0], row, colWidths[1], normalStyle, dev.MacAddress)
 
 		// Draw RSSI
-		drawText(s, colWidths[0], row, colWidths[1], normalStyle, fmt.Sprintf("%d", dev.RSSI))
+		drawText(s, colWidths[0]+colWidths[1], row, colWidths[2], normalStyle, fmt.Sprintf("%d", dev.RSSI))
 
 		// Draw device name
-		drawText(s, colWidths[0]+colWidths[1], row, colWidths[2], normalStyle, dev.DeviceName)
+		drawText(s, colWidths[0]+colWidths[1]+colWidths[2], row, colWidths[3], normalStyle, dev.DeviceName)
 
 		// Draw Mfr Code (as integer)
 		mfrCodeStr := ""
 		if dev.MfrCode != 0 {
 			mfrCodeStr = fmt.Sprintf("%d", dev.MfrCode)
 		}
-		drawText(s, colWidths[0]+colWidths[1]+colWidths[2], row, colWidths[3], normalStyle, mfrCodeStr)
+		drawText(s, colWidths[0]+colWidths[1]+colWidths[2]+colWidths[3], row, colWidths[4], normalStyle, mfrCodeStr)
 
 		// Draw service UUIDs (multi-line with ellipsis support)
-		uuidCol := colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3]
+		uuidCol := colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3] + colWidths[4]
 		if len(dev.ServiceUUIDs) == 0 {
-			drawText(s, uuidCol, row, colWidths[4], normalStyle, "")
+			drawText(s, uuidCol, row, colWidths[5], normalStyle, "")
 		} else {
 			for i, uuid := range dev.ServiceUUIDs {
 				if row+i >= maxRow {
@@ -349,10 +416,10 @@ func drawDeviceTable(s tcell.Screen, devices []*BLEDevice, colWidths []int, titl
 				}
 				// Ellipsize if UUID is longer than column width
 				displayUUID := uuid
-				if len(uuid) > colWidths[4] && colWidths[4] > 3 {
-					displayUUID = uuid[:colWidths[4]-3] + "..."
+				if len(uuid) > colWidths[5] && colWidths[5] > 3 {
+					displayUUID = uuid[:colWidths[5]-3] + "..."
 				}
-				drawText(s, uuidCol, row+i, colWidths[4], normalStyle, displayUUID)
+				drawText(s, uuidCol, row+i, colWidths[5], normalStyle, displayUUID)
 			}
 		}
 
