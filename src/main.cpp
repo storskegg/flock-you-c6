@@ -15,9 +15,9 @@ static unsigned long fyLastBleScan = 0;
 
 
 static std::string getUUID(const NimBLEAdvertisedDevice* device) {
-    if (!device || !device->haveServiceUUID()) return "";
+    if (!device || !device->haveServiceUUID()) return "[]";
     int count = device->getServiceUUIDCount();
-    if (count == 0) return "";
+    if (count == 0) return "[]";
     int lastIdx = count-1;
     std::string uids = "[";
     for (int i = 0; i < count; i++) {
@@ -55,7 +55,7 @@ class FYBLECallbacks : public NimBLEScanCallbacks {
 
         printf("{\"protocol\":\"bluetooth_le\",\"mac_address\":\"%s\",\"rssi\":%d,\"mfrCode\":\"0x%04x\","
                 "\"device_name\":\"%s\","
-                "\"serviceUUID\":\"%s\",}\n",
+                "\"serviceUUID\":%s}\n",
                 addrStr.c_str(), rssi, mfrCode, name.c_str(), serviceUuid.c_str());
 
     }
