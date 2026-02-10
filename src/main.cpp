@@ -38,8 +38,8 @@ class FYBLECallbacks : public NimBLEScanCallbacks {
         // Device Service UUID
 
         std::string serviceUuid = dev->haveServiceUUID() ? dev->getServiceUUID().toString() : "";
+        
         uint16_t mfrCode = 0;
-
         for (int i = 0; i < (int)dev->getManufacturerDataCount(); i++) {
             std::string data = dev->getManufacturerData(i);
             if (data.size() >= 2) {
@@ -105,6 +105,18 @@ class FYBLECallbacks : public NimBLEScanCallbacks {
         // }
     }
 } scanCallbacks;
+
+
+static bool checkUUID(NimBLEAdvertisedDevice* device, char* out_uuid = nullptr) {
+    if (!device || !device->haveServiceUUID()) return false;
+    int count = device->getServiceUUIDCount();
+    if (count == 0) return false;
+    for (int i = 0; i < count; i++) {
+        NimBLEUUID svc = device->getServiceDataUUID(i);
+        std::string str = svc.toString();
+        for (size_t j = 0; j < sizeof())
+    }
+}
 
 void setup() {
     Serial.begin(115200);
