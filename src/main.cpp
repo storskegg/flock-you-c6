@@ -76,7 +76,7 @@ void reportDevice(const NimBLEAdvertisedDevice* dev) {
         }
     }
 
-    printf("{\"mac_address\":\"%s\",\"rssi\":%d,\"mfr_code\":\"0x%04x\","
+    printf("{\"mac_address\":\"%s\",\"rssi\":%d,\"mfr_code\":%lu,"
             "\"device_name\":\"%s\","
             "\"service_uuids\":%s}\n",
             addrStr.c_str(), rssi, mfrCode, name.c_str(), serviceUuid.c_str());
