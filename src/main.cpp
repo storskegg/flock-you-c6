@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <base64.h>
 #include <NimBLEDevice.h>
 #include <NimBLEAdvertisedDevice.h>
 #include "NimBLEEddystoneTLM.h"
@@ -54,9 +55,24 @@ static std::string getUUID(const NimBLEAdvertisedDevice* device) {
 }
 
 void reportDevice(const NimBLEAdvertisedDevice* dev) {
+    std::string mfrDataRaw = dev->getManufacturerData();
+
+    // return quick if we're handling an iBeacon; they're just noise
+    if (mfrDataRaw.length() == 25 && mfrDataRaw[0] == 0x4C && mfrDataRaw[1] == 0x00) {
+        return;
+    }
+
+    std::string mfrDataB64 = mfrDataRaw.length() > 0 ? Base64::encode(mfrDataRaw) : "";
+
+    // derive manufacturer code from mfr data, if present
+    uint16_t mfrCode = 0;
+    if (mfrDataRaw.length() > 1) {
+        mfrCode = ((uint16_t)(uint8_t)mfrDataRaw[1] << 8) |
+                                (uint16_t)(uint8_t)mfrDataRaw[0];
+    }
+
     // Device MAC Address
-    NimBLEAddress addr = dev->getAddress();
-    std::string addrStr = addr.toString();
+    std::string addrStr = dev->getAddress().toString();
 
     // Device RSSI
     int rssi = dev->getRSSI();
@@ -67,19 +83,10 @@ void reportDevice(const NimBLEAdvertisedDevice* dev) {
     // Device Service UUID
     std::string serviceUuid = getUUID(dev);
 
-    uint16_t mfrCode = 0;
-    for (int i = 0; i < (int)dev->getManufacturerDataCount(); i++) {
-        std::string data = dev->getManufacturerData(i);
-        if (data.size() >= 2) {
-            mfrCode = ((uint16_t)(uint8_t)data[1] << 8) |
-                                (uint16_t)(uint8_t)data[0];
-        }
-    }
-
     printf("{\"mac_address\":\"%s\",\"rssi\":%d,\"mfr_code\":%lu,"
             "\"device_name\":\"%s\","
-            "\"service_uuids\":%s}\n",
-            addrStr.c_str(), rssi, mfrCode, name.c_str(), serviceUuid.c_str());
+            "\"service_uuids\":%s,\"mfr_data\":\"%s\"}\n",
+            addrStr.c_str(), rssi, mfrCode, name.c_str(), serviceUuid.c_str(), mfrDataB64.c_str());
 }
 
 class FYBLECallbacks : public NimBLEScanCallbacks {
