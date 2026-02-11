@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/gen2brain/beeep"
 	"go.bug.st/serial"
 )
 
@@ -42,6 +43,63 @@ type TableState struct {
 	nearScrollOffset int
 	farScrollOffset  int
 	focusedTable     string // "near" or "far"
+}
+
+// ConnectionState tracks serial connection status
+type ConnectionState struct {
+	mu            sync.RWMutex
+	connected     bool
+	lastError     error
+	lastErrorTime time.Time
+	totalAttempts int
+}
+
+func (cs *ConnectionState) SetConnected(connected bool) {
+	cs.mu.Lock()
+	cs.connected = connected
+	if connected {
+		cs.totalAttempts = 0
+	}
+	cs.mu.Unlock()
+}
+
+func (cs *ConnectionState) SetError(err error) {
+	cs.mu.Lock()
+	cs.lastError = err
+	cs.lastErrorTime = time.Now()
+	cs.totalAttempts++
+	cs.mu.Unlock()
+}
+
+func (cs *ConnectionState) GetStatus() (bool, error, time.Time, int) {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.connected, cs.lastError, cs.lastErrorTime, cs.totalAttempts
+}
+
+// Sound notification functions - all run in goroutines to avoid blocking
+
+func playDisconnectSound() {
+	go func() {
+		// Low frequency, longer duration - ominous
+		beeep.Beep(400, 300)
+	}()
+}
+
+func playReconnectAttemptSound() {
+	go func() {
+		// Mid frequency, short blip
+		beeep.Beep(600, 100)
+	}()
+}
+
+func playConnectedSound() {
+	go func() {
+		// Ascending two-tone success melody
+		beeep.Beep(600, 150)
+		time.Sleep(50 * time.Millisecond)
+		beeep.Beep(800, 150)
+	}()
 }
 
 // Message represents both notification and BLE device messages
@@ -192,15 +250,122 @@ func processSerialLine(line string, agg *Aggregator, paused *bool, pauseMu *sync
 	}
 }
 
-// readSerial reads from reader and processes lines non-blocking
-func readSerial(reader io.Reader, agg *Aggregator, paused *bool, pauseMu *sync.RWMutex, done <-chan struct{}) {
+// openSerialPort attempts to open a serial port with the given configuration
+func openSerialPort(portPath string, baudRate int) (io.ReadCloser, error) {
+	mode := &serial.Mode{
+		BaudRate: baudRate,
+		DataBits: 8,
+		Parity:   serial.NoParity,
+		StopBits: serial.OneStopBit,
+	}
+	return serial.Open(portPath, mode)
+}
+
+// readSerial reads from reader and processes lines, with automatic reconnection for serial ports
+// Reconnection attempts continue indefinitely with exponential backoff until success or app quit
+func readSerial(portPath string, baudRate int, agg *Aggregator, paused *bool, pauseMu *sync.RWMutex, connState *ConnectionState, done <-chan struct{}) {
+	var reader io.ReadCloser
+	var err error
+
+	// If portPath is empty, we're reading from stdin (no reconnection)
+	if portPath == "" {
+		reader = os.Stdin
+		connState.SetConnected(true)
+		readSerialLoop(reader, agg, paused, pauseMu, connState, done)
+		return
+	}
+
+	// For serial ports, implement reconnection logic
+	reconnectDelay := 1 * time.Second
+	maxReconnectDelay := 30 * time.Second
+
+	for {
+		select {
+		case <-done:
+			if reader != nil {
+				reader.Close()
+			}
+			return
+		default:
+		}
+
+		// Attempt to open/reopen the serial port
+		reader, err = openSerialPort(portPath, baudRate)
+		if err != nil {
+			wasConnected := false
+			connState.mu.RLock()
+			wasConnected = connState.connected
+			connState.mu.RUnlock()
+
+			connState.SetConnected(false)
+			connState.SetError(err)
+
+			// Play disconnect sound only on first failure (not repeated attempts)
+			if wasConnected {
+				playDisconnectSound()
+			} else {
+				// Play reconnect attempt sound for subsequent failures
+				playReconnectAttemptSound()
+			}
+
+			// Wait before retrying
+			select {
+			case <-done:
+				return
+			case <-time.After(reconnectDelay):
+				// Exponential backoff, max 30 seconds
+				reconnectDelay *= 2
+				if reconnectDelay > maxReconnectDelay {
+					reconnectDelay = maxReconnectDelay
+				}
+			}
+			continue
+		}
+
+		// Successfully connected
+		connState.SetConnected(true)
+		reconnectDelay = 1 * time.Second // Reset backoff
+
+		// Play success sound
+		playConnectedSound()
+
+		// Read from the port until error or done
+		err = readSerialLoop(reader, agg, paused, pauseMu, connState, done)
+
+		// Close the port
+		reader.Close()
+
+		// If we're done, exit
+		select {
+		case <-done:
+			return
+		default:
+		}
+
+		// Connection lost, mark as disconnected and retry
+		connState.SetConnected(false)
+		if err != nil {
+			connState.SetError(err)
+		}
+
+		// Brief delay before reconnect attempt
+		select {
+		case <-done:
+			return
+		case <-time.After(reconnectDelay):
+		}
+	}
+}
+
+// readSerialLoop performs the actual reading and processing
+func readSerialLoop(reader io.ReadCloser, agg *Aggregator, paused *bool, pauseMu *sync.RWMutex, connState *ConnectionState, done <-chan struct{}) error {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024) // Increase buffer for large lines
 
 	for {
 		select {
 		case <-done:
-			return
+			return nil
 		default:
 			if scanner.Scan() {
 				line := scanner.Text()
@@ -208,17 +373,18 @@ func readSerial(reader io.Reader, agg *Aggregator, paused *bool, pauseMu *sync.R
 				processSerialLine(line, agg, paused, pauseMu)
 			} else {
 				if err := scanner.Err(); err != nil {
-					return
+					// Scanner error (likely connection issue)
+					return err
 				}
-				// EOF or no data available
-				time.Sleep(1 * time.Millisecond)
+				// EOF - connection closed
+				return io.EOF
 			}
 		}
 	}
 }
 
 // drawTable renders near devices, far devices, and special manufacturer tables to the screen
-func drawTable(s tcell.Screen, devices []*BLEDevice, paused bool, state *TableState) {
+func drawTable(s tcell.Screen, devices []*BLEDevice, paused bool, state *TableState, connState *ConnectionState) {
 	s.Clear()
 	width, height := s.Size()
 
@@ -271,6 +437,20 @@ func drawTable(s tcell.Screen, devices []*BLEDevice, paused bool, state *TableSt
 	if paused {
 		statusText += " | [PAUSED]"
 	}
+
+	// Add connection status
+	connected, _, lastErrTime, attempts := connState.GetStatus()
+	if connected {
+		statusText += " | ✓ CONNECTED"
+	} else {
+		if attempts > 0 {
+			elapsed := time.Since(lastErrTime).Round(time.Second)
+			statusText += fmt.Sprintf(" | ✗ DISCONNECTED (attempt %d, %v ago)", attempts, elapsed)
+		} else {
+			statusText += " | ○ CONNECTING..."
+		}
+	}
+
 	// Add focus indicator and scroll position
 	if state.focusedTable == "near" {
 		statusText += fmt.Sprintf(" | Focus: NEAR (row %d-%d of %d)",
@@ -535,30 +715,13 @@ func main() {
 	// Done channel for graceful shutdown
 	done := make(chan struct{})
 
-	// Determine input source
-	var reader io.ReadCloser
-	if *serialPort != "" {
-		// Open serial port
-		mode := &serial.Mode{
-			BaudRate: *baudRate,
-			DataBits: 8,
-			Parity:   serial.NoParity,
-			StopBits: serial.OneStopBit,
-		}
-		port, err := serial.Open(*serialPort, mode)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error opening serial port %s: %v\n", *serialPort, err)
-			os.Exit(1)
-		}
-		reader = port
-		defer port.Close()
-	} else {
-		// Use stdin
-		reader = os.Stdin
+	// Initialize connection state
+	connState := &ConnectionState{
+		connected: false,
 	}
 
-	// Start reading from input source
-	go readSerial(reader, agg, &paused, &pauseMu, done)
+	// Start reading from input source (handles reconnection internally)
+	go readSerial(*serialPort, *baudRate, agg, &paused, &pauseMu, connState, done)
 
 	// Initialize screen
 	s, err := tcell.NewScreen()
@@ -591,7 +754,7 @@ func main() {
 	defer ticker.Stop()
 
 	// Initial draw
-	drawTable(s, agg.GetSorted(), paused, tableState)
+	drawTable(s, agg.GetSorted(), paused, tableState, connState)
 
 	// Event loop
 	quit := false
@@ -601,7 +764,7 @@ func main() {
 			pauseMu.RLock()
 			isPaused := paused
 			pauseMu.RUnlock()
-			drawTable(s, agg.GetSorted(), isPaused, tableState)
+			drawTable(s, agg.GetSorted(), isPaused, tableState, connState)
 
 		case <-sigChan:
 			quit = true
@@ -630,7 +793,7 @@ func main() {
 							// Reset scroll positions
 							tableState.nearScrollOffset = 0
 							tableState.farScrollOffset = 0
-							drawTable(s, agg.GetSorted(), paused, tableState)
+							drawTable(s, agg.GetSorted(), paused, tableState, connState)
 						case 'p', 'P':
 							pauseMu.Lock()
 							paused = !paused
@@ -641,7 +804,7 @@ func main() {
 							} else {
 								tableState.farScrollOffset++
 							}
-							drawTable(s, agg.GetSorted(), paused, tableState)
+							drawTable(s, agg.GetSorted(), paused, tableState, connState)
 						case 'k', 'K': // Scroll up (vim-style)
 							if tableState.focusedTable == "near" {
 								tableState.nearScrollOffset--
@@ -654,7 +817,7 @@ func main() {
 									tableState.farScrollOffset = 0
 								}
 							}
-							drawTable(s, agg.GetSorted(), paused, tableState)
+							drawTable(s, agg.GetSorted(), paused, tableState, connState)
 						}
 					case tcell.KeyUp:
 						if tableState.focusedTable == "near" {
@@ -668,14 +831,14 @@ func main() {
 								tableState.farScrollOffset = 0
 							}
 						}
-						drawTable(s, agg.GetSorted(), paused, tableState)
+						drawTable(s, agg.GetSorted(), paused, tableState, connState)
 					case tcell.KeyDown:
 						if tableState.focusedTable == "near" {
 							tableState.nearScrollOffset++
 						} else {
 							tableState.farScrollOffset++
 						}
-						drawTable(s, agg.GetSorted(), paused, tableState)
+						drawTable(s, agg.GetSorted(), paused, tableState, connState)
 					case tcell.KeyPgUp:
 						if tableState.focusedTable == "near" {
 							tableState.nearScrollOffset -= 10
@@ -688,21 +851,21 @@ func main() {
 								tableState.farScrollOffset = 0
 							}
 						}
-						drawTable(s, agg.GetSorted(), paused, tableState)
+						drawTable(s, agg.GetSorted(), paused, tableState, connState)
 					case tcell.KeyPgDn:
 						if tableState.focusedTable == "near" {
 							tableState.nearScrollOffset += 10
 						} else {
 							tableState.farScrollOffset += 10
 						}
-						drawTable(s, agg.GetSorted(), paused, tableState)
+						drawTable(s, agg.GetSorted(), paused, tableState, connState)
 					case tcell.KeyHome:
 						if tableState.focusedTable == "near" {
 							tableState.nearScrollOffset = 0
 						} else {
 							tableState.farScrollOffset = 0
 						}
-						drawTable(s, agg.GetSorted(), paused, tableState)
+						drawTable(s, agg.GetSorted(), paused, tableState, connState)
 					case tcell.KeyEnd:
 						devices := agg.GetSorted()
 						if tableState.focusedTable == "near" {
@@ -710,7 +873,7 @@ func main() {
 						} else {
 							tableState.farScrollOffset = len(devices)
 						}
-						drawTable(s, agg.GetSorted(), paused, tableState)
+						drawTable(s, agg.GetSorted(), paused, tableState, connState)
 					case tcell.KeyTab:
 						// Switch focus between tables
 						if tableState.focusedTable == "near" {
@@ -718,7 +881,7 @@ func main() {
 						} else {
 							tableState.focusedTable = "near"
 						}
-						drawTable(s, agg.GetSorted(), paused, tableState)
+						drawTable(s, agg.GetSorted(), paused, tableState, connState)
 					case tcell.KeyCtrlC:
 						quit = true
 					}
@@ -745,7 +908,7 @@ func main() {
 								tableState.farScrollOffset = 0
 							}
 						}
-						drawTable(s, agg.GetSorted(), paused, tableState)
+						drawTable(s, agg.GetSorted(), paused, tableState, connState)
 					} else if buttons&tcell.WheelDown != 0 {
 						// Scroll down
 						if y < midPoint && tableState.focusedTable == "near" {
@@ -753,14 +916,14 @@ func main() {
 						} else if y >= midPoint && tableState.focusedTable == "far" {
 							tableState.farScrollOffset++
 						}
-						drawTable(s, agg.GetSorted(), paused, tableState)
+						drawTable(s, agg.GetSorted(), paused, tableState, connState)
 					}
 				case *tcell.EventResize:
 					s.Sync()
 					pauseMu.RLock()
 					isPaused := paused
 					pauseMu.RUnlock()
-					drawTable(s, agg.GetSorted(), isPaused, tableState)
+					drawTable(s, agg.GetSorted(), isPaused, tableState, connState)
 				}
 			}
 			time.Sleep(10 * time.Millisecond)
