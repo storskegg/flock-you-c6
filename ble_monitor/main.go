@@ -22,12 +22,11 @@ import (
 const (
 	colWidthLastSeen     = 21 // "YYYY-MM-DD hh:mm:ss" + padding
 	colWidthMAC          = 19
-	colWidthSignal       = 7 // Signal strength indicator
+	colWidthSignal       = 9 // Signal strength indicator
 	colWidthRSSI         = 6
 	colWidthName         = 30
 	colWidthServiceUUIDs = 38 // Fixed width, moved between Name and MfrCode
 	colWidthMfrCode      = 8
-	colPadding           = 7 // Total padding between columns
 )
 
 // Time threshold for recent/stale device separation
@@ -438,7 +437,7 @@ func drawTable(s tcell.Screen, devices []*BLEDevice, paused bool, state *TableSt
 		colWidthName,
 		colWidthServiceUUIDs,
 		colWidthMfrCode,
-		width - colWidthLastSeen - colWidthMAC - colWidthSignal - colWidthRSSI - colWidthName - colWidthServiceUUIDs - colWidthMfrCode - colPadding,
+		width - colWidthLastSeen - colWidthMAC - colWidthSignal - colWidthRSSI - colWidthName - colWidthServiceUUIDs - colWidthMfrCode,
 	}
 
 	// Split devices into recent and stale based on last seen time
@@ -641,12 +640,20 @@ func drawDeviceTable(s tcell.Screen, devices []*BLEDevice, colWidths []int, titl
 
 // drawText draws text at a specific position
 func drawText(s tcell.Screen, x, y, width int, style tcell.Style, text string) {
-	for i := 0; i < width && i < len(text); i++ {
-		s.SetContent(x+i, y, rune(text[i]), nil, style)
+	// Convert string to runes to properly handle UTF-8 multi-byte characters
+	runes := []rune(text)
+	col := 0
+
+	// Draw each rune
+	for i := 0; i < len(runes) && col < width; i++ {
+		s.SetContent(x+col, y, runes[i], nil, style)
+		col++
 	}
-	// Fill remaining space
-	for i := len(text); i < width; i++ {
-		s.SetContent(x+i, y, ' ', nil, style)
+
+	// Fill remaining space with blanks
+	for col < width {
+		s.SetContent(x+col, y, ' ', nil, style)
+		col++
 	}
 }
 
@@ -672,19 +679,19 @@ func getSignalIndicator(rssi int) (string, tcell.Color) {
 
 	// Determine color and number of bars based on RSSI thresholds
 	if rssi > -50 {
-		// Excellent - Blue - 7 bars
+		// Excellent - Blue - 9 bars
 		bars = 7
 		color = tcell.ColorBlue
 	} else if rssi > -60 {
-		// Good - Green - 6 bars
-		bars = 6
+		// Good - Green - 7 bars
+		bars = 5
 		color = tcell.ColorGreen
 	} else if rssi > -70 {
-		// Fair - Yellow - 4 bars
-		bars = 4
+		// Fair - Yellow - 5 bars
+		bars = 3
 		color = tcell.ColorYellow
 	} else if rssi > -80 {
-		// Poor - Orange - 2 bars
+		// Poor - Orange - 3 bars
 		bars = 2
 		color = tcell.ColorOrange
 	} else {
@@ -693,14 +700,14 @@ func getSignalIndicator(rssi int) (string, tcell.Color) {
 		color = tcell.ColorRed
 	}
 
-	// Build the indicator string using UTF-8 box-drawing characters
-	// Full block: ▮ (U+25AE) for filled
+	// Build the indicator string using gradient blocks
+	// Full block: █ (U+2588) for filled
 	// Light shade: ░ (U+2591) for empty
 	indicator := ""
 	for i := 0; i < bars; i++ {
-		indicator += "▮"
+		indicator += "█"
 	}
-	for i := bars; i < 7; i++ {
+	for i := bars; i < colWidthSignal-2; i++ {
 		indicator += "░"
 	}
 
