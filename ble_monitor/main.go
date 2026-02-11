@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"sort"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -21,12 +20,13 @@ import (
 
 // Column width constants for TUI table
 const (
-	colWidthLastSeen = 21 // "YYYY-MM-DD hh:mm:ss" + padding
-	colWidthMAC      = 20
-	colWidthRSSI     = 8
-	colWidthName     = 30
-	colWidthMfrCode  = 10
-	colPadding       = 5 // Total padding between columns
+	colWidthLastSeen     = 21 // "YYYY-MM-DD hh:mm:ss" + padding
+	colWidthMAC          = 19
+	colWidthRSSI         = 6
+	colWidthName         = 30
+	colWidthServiceUUIDs = 38 // Fixed width, moved between Name and MfrCode
+	colWidthMfrCode      = 8
+	colPadding           = 6 // Total padding between columns
 )
 
 // Refresh rate for TUI
@@ -34,9 +34,6 @@ const refreshInterval = 250 * time.Millisecond
 
 // RSSI threshold for near/far device separation
 const nearDeviceRssiLimit = -75
-
-// Special manufacturer code for bottom table display
-const specialMfrCode = 76 // Apple Inc.
 
 // TableState tracks scrolling and focus state for the tables
 type TableState struct {
@@ -49,7 +46,6 @@ type TableState struct {
 type ConnectionState struct {
 	mu            sync.RWMutex
 	connected     bool
-	lastError     error
 	lastErrorTime time.Time
 	totalAttempts int
 	modalShown    bool // Track if disconnection modal is currently displayed
@@ -66,16 +62,15 @@ func (cs *ConnectionState) SetConnected(connected bool) {
 
 func (cs *ConnectionState) SetError(err error) {
 	cs.mu.Lock()
-	cs.lastError = err
 	cs.lastErrorTime = time.Now()
 	cs.totalAttempts++
 	cs.mu.Unlock()
 }
 
-func (cs *ConnectionState) GetStatus() (bool, error, time.Time, int) {
+func (cs *ConnectionState) GetStatus() (bool, time.Time, int) {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	return cs.connected, cs.lastError, cs.lastErrorTime, cs.totalAttempts
+	return cs.connected, cs.lastErrorTime, cs.totalAttempts
 }
 
 func (cs *ConnectionState) SetModalShown(shown bool) {
@@ -122,6 +117,7 @@ type Message struct {
 	MacAddress   string   `json:"mac_address,omitempty"`
 	RSSI         int      `json:"rssi,omitempty"`
 	MfrCode      int      `json:"mfr_code,omitempty"`
+	MfrData      string   `json:"mfr_data,omitempty"`
 	DeviceName   string   `json:"device_name,omitempty"`
 	ServiceUUIDs []string `json:"service_uuids,omitempty"`
 }
@@ -132,6 +128,7 @@ type BLEDevice struct {
 	RSSI         int
 	DeviceName   string
 	MfrCode      int
+	MfrData      string
 	ServiceUUIDs []string
 	LastSeen     time.Time
 }
@@ -178,6 +175,11 @@ func (a *Aggregator) AddOrUpdate(device *BLEDevice) {
 	// Update MfrCode (always update if non-zero)
 	if existing.MfrCode == 0 || device.MfrCode != 0 {
 		existing.MfrCode = device.MfrCode
+	}
+
+	// Update MfrData
+	if existing.MfrData == "" || device.MfrData != "" {
+		existing.MfrData = device.MfrData
 	}
 
 	// Update ServiceUUIDs
@@ -256,6 +258,7 @@ func processSerialLine(line string, agg *Aggregator, paused *bool, pauseMu *sync
 			RSSI:         msg.RSSI,
 			DeviceName:   msg.DeviceName,
 			MfrCode:      msg.MfrCode,
+			MfrData:      msg.MfrData,
 			ServiceUUIDs: msg.ServiceUUIDs,
 			LastSeen:     time.Now().UTC(),
 		}
@@ -402,41 +405,30 @@ func drawTable(s tcell.Screen, devices []*BLEDevice, paused bool, state *TableSt
 	width, height := s.Size()
 
 	// Calculate column widths using constants
+	// Order: Last Seen, MAC, RSSI, Name, Service UUIDs, Mfr Code, Mfr Data (variable)
 	colWidths := []int{
 		colWidthLastSeen,
 		colWidthMAC,
 		colWidthRSSI,
 		colWidthName,
+		colWidthServiceUUIDs,
 		colWidthMfrCode,
-		width - colWidthLastSeen - colWidthMAC - colWidthRSSI - colWidthName - colWidthMfrCode - colPadding,
+		width - colWidthLastSeen - colWidthMAC - colWidthRSSI - colWidthName - colWidthServiceUUIDs - colWidthMfrCode - colPadding,
 	}
 
-	// Split devices into near, far, and special manufacturer
+	// Split devices into near and far based on RSSI
 	var nearDevices, farDevices []*BLEDevice
-	var specialMfrMACs []string
 
 	for _, dev := range devices {
-		if dev.MfrCode == specialMfrCode {
-			specialMfrMACs = append(specialMfrMACs, dev.MacAddress)
-		} else if dev.RSSI >= nearDeviceRssiLimit {
+		if dev.RSSI >= nearDeviceRssiLimit {
 			nearDevices = append(nearDevices, dev)
 		} else {
 			farDevices = append(farDevices, dev)
 		}
 	}
 
-	// Sort special manufacturer MAC addresses alphabetically
-	sort.Strings(specialMfrMACs)
-
-	// Calculate special table height (title + header + wrapped MAC address rows)
-	mfrCodeColWidth := 15
-	macListColWidth := width - mfrCodeColWidth
-	macList := strings.Join(specialMfrMACs, ", ")
-	wrappedMACLines := wordWrapMACs(macList, macListColWidth)
-	specialTableHeight := 2 + len(wrappedMACLines) // title + header + data rows
-
-	// Calculate available height for near/far tables (minus status line and special table)
-	availableHeight := height - 1 - specialTableHeight
+	// Calculate available height for near/far tables (minus status line)
+	availableHeight := height - 1
 
 	// Split 50-50, with far devices getting -1 row if odd height
 	nearTableHeight := availableHeight / 2
@@ -444,7 +436,7 @@ func drawTable(s tcell.Screen, devices []*BLEDevice, paused bool, state *TableSt
 		nearTableHeight = (availableHeight / 2) + 1
 	}
 
-	// Draw status line at bottom (moved here so we have access to nearTableHeight and availableHeight)
+	// Draw status line at bottom
 	statusStyle := tcell.StyleDefault.Background(tcell.ColorDarkSlateGray).Foreground(tcell.ColorWhite)
 	statusText := "q: Quit | e: Export | c: Clear | p: Pause | ↑↓/jk: Scroll | Tab: Switch | PgUp/PgDn/Home/End"
 	if paused {
@@ -452,7 +444,7 @@ func drawTable(s tcell.Screen, devices []*BLEDevice, paused bool, state *TableSt
 	}
 
 	// Add connection status
-	connected, _, lastErrTime, attempts := connState.GetStatus()
+	connected, lastErrTime, attempts := connState.GetStatus()
 	if connected {
 		statusText += " | ✓ CONNECTED"
 	} else {
@@ -487,93 +479,12 @@ func drawTable(s tcell.Screen, devices []*BLEDevice, paused bool, state *TableSt
 	isFocused = state.focusedTable == "far"
 	row = drawDeviceTable(s, farDevices, colWidths, "FAR DEVICES", row, availableHeight, state.farScrollOffset, isFocused)
 
-	// Draw special manufacturer table at the bottom (just above status line)
-	drawSpecialMfrTable(s, specialMfrMACs, row, height-1)
-
 	// Draw disconnection modal overlay if not connected
-	connected, _, _, _ = connState.GetStatus()
 	if !connected {
 		drawDisconnectionModal(s, connState)
 	}
 
 	s.Show()
-}
-
-// drawSpecialMfrTable renders the special manufacturer code table
-func drawSpecialMfrTable(s tcell.Screen, macAddresses []string, startRow int, maxRow int) {
-	width, _ := s.Size()
-
-	// Draw table title
-	titleStyle := tcell.StyleDefault.Bold(true).Background(tcell.ColorDarkGreen).Foreground(tcell.ColorWhite)
-	drawText(s, 0, startRow, width, titleStyle, fmt.Sprintf(" MFR CODE %d ", specialMfrCode))
-	startRow++
-
-	// Draw header
-	headerStyle := tcell.StyleDefault.Bold(true).Background(tcell.ColorNavy).Foreground(tcell.ColorWhite)
-	mfrCodeColWidth := 15
-	macListColWidth := width - mfrCodeColWidth
-
-	drawText(s, 0, startRow, mfrCodeColWidth, headerStyle, "Mfr Code")
-	drawText(s, mfrCodeColWidth, startRow, macListColWidth, headerStyle, "MAC Addresses")
-	startRow++
-
-	// Draw data rows with word-wrapped MAC addresses
-	normalStyle := tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorBlack)
-
-	// Draw Mfr Code in first row only
-	drawText(s, 0, startRow, mfrCodeColWidth, normalStyle, fmt.Sprintf("%d", specialMfrCode))
-
-	// Word-wrap MAC addresses at comma/whitespace boundaries
-	macList := strings.Join(macAddresses, ", ")
-	wrappedLines := wordWrapMACs(macList, macListColWidth)
-
-	for i, line := range wrappedLines {
-		if startRow+i >= maxRow {
-			break
-		}
-		drawText(s, mfrCodeColWidth, startRow+i, macListColWidth, normalStyle, line)
-	}
-}
-
-// wordWrapMACs wraps a comma-separated list of MAC addresses to fit within maxWidth
-// Only breaks at comma+space boundaries, never in the middle of a MAC address
-func wordWrapMACs(text string, maxWidth int) []string {
-	if len(text) <= maxWidth {
-		return []string{text}
-	}
-
-	var lines []string
-	currentLine := ""
-
-	// Split by ", " to get individual MAC addresses
-	macs := strings.Split(text, ", ")
-
-	for _, mac := range macs {
-		// Check if adding this MAC (with separator if needed) would exceed width
-		testLine := currentLine
-		if currentLine != "" {
-			testLine += ", "
-		}
-		testLine += mac
-
-		if len(testLine) <= maxWidth {
-			// Fits on current line
-			currentLine = testLine
-		} else {
-			// Doesn't fit, start new line
-			if currentLine != "" {
-				lines = append(lines, currentLine)
-			}
-			currentLine = mac
-		}
-	}
-
-	// Add the last line
-	if currentLine != "" {
-		lines = append(lines, currentLine)
-	}
-
-	return lines
 }
 
 // drawDeviceTable renders a single device table with the given title
@@ -597,7 +508,7 @@ func drawDeviceTable(s tcell.Screen, devices []*BLEDevice, colWidths []int, titl
 
 	// Draw header
 	headerStyle := tcell.StyleDefault.Bold(true).Background(tcell.ColorNavy).Foreground(tcell.ColorWhite)
-	headers := []string{"Last Seen", "MAC Address", "RSSI", "Device Name", "Mfr Code", "Service UUIDs"}
+	headers := []string{"Last Seen", "MAC Address", "RSSI", "Device Name", "Service UUIDs", "Mfr ID", "Mfr Data"}
 
 	col := 0
 	for i, header := range headers {
@@ -649,17 +560,10 @@ func drawDeviceTable(s tcell.Screen, devices []*BLEDevice, colWidths []int, titl
 		// Draw device name
 		drawText(s, colWidths[0]+colWidths[1]+colWidths[2], row, colWidths[3], normalStyle, dev.DeviceName)
 
-		// Draw Mfr Code (as integer)
-		mfrCodeStr := ""
-		if dev.MfrCode != 0 {
-			mfrCodeStr = fmt.Sprintf("%d", dev.MfrCode)
-		}
-		drawText(s, colWidths[0]+colWidths[1]+colWidths[2]+colWidths[3], row, colWidths[4], normalStyle, mfrCodeStr)
-
-		// Draw service UUIDs (multi-line with ellipsis support)
-		uuidCol := colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3] + colWidths[4]
+		// Draw service UUIDs (multi-line with ellipsis support) - now fixed width at 38 chars
+		uuidCol := colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3]
 		if len(dev.ServiceUUIDs) == 0 {
-			drawText(s, uuidCol, row, colWidths[5], normalStyle, "")
+			drawText(s, uuidCol, row, colWidths[4], normalStyle, "")
 		} else {
 			for j, uuid := range dev.ServiceUUIDs {
 				if row+j >= maxRow {
@@ -667,12 +571,23 @@ func drawDeviceTable(s tcell.Screen, devices []*BLEDevice, colWidths []int, titl
 				}
 				// Ellipsize if UUID is longer than column width
 				displayUUID := uuid
-				if len(uuid) > colWidths[5] && colWidths[5] > 3 {
-					displayUUID = uuid[:colWidths[5]-3] + "..."
+				if len(uuid) > colWidths[4] && colWidths[4] > 3 {
+					displayUUID = uuid[:colWidths[4]-3] + "..."
 				}
-				drawText(s, uuidCol, row+j, colWidths[5], normalStyle, displayUUID)
+				drawText(s, uuidCol, row+j, colWidths[4], normalStyle, displayUUID)
 			}
 		}
+
+		// Draw Mfr Code (as integer)
+		mfrCodeStr := ""
+		if dev.MfrCode != 0 {
+			mfrCodeStr = fmt.Sprintf("%d", dev.MfrCode)
+		}
+		drawText(s, colWidths[0]+colWidths[1]+colWidths[2]+colWidths[3]+colWidths[4], row, colWidths[5], normalStyle, mfrCodeStr)
+
+		// Draw Mfr Data (variable width - fills remaining space)
+		mfrDataCol := colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3] + colWidths[4] + colWidths[5]
+		drawText(s, mfrDataCol, row, colWidths[6], normalStyle, dev.MfrData)
 
 		row += uuidLines
 	}
@@ -729,7 +644,7 @@ func drawDisconnectionModal(s tcell.Screen, connState *ConnectionState) {
 	modalY := (height - modalHeight) / 2
 
 	// Get connection status
-	_, _, lastErrTime, attempts := connState.GetStatus()
+	_, lastErrTime, attempts := connState.GetStatus()
 	elapsed := time.Since(lastErrTime).Round(time.Second)
 
 	// Styles
