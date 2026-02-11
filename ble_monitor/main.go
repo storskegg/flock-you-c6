@@ -29,9 +29,6 @@ const (
 	colPadding           = 6 // Total padding between columns
 )
 
-// Refresh rate for TUI
-const refreshInterval = 250 * time.Millisecond
-
 // RSSI threshold for near/far device separation
 const nearDeviceRssiLimit = -75
 
@@ -728,7 +725,11 @@ func main() {
 	// Command-line flags
 	serialPort := flag.String("port", "", "Serial port device (e.g., /dev/ttyUSB0). If not specified, reads from stdin.")
 	baudRate := flag.Int("baud", 115200, "Baud rate for serial port (default: 115200)")
+	refreshRate := flag.Int("refresh", 4, "TUI refresh rate in updates per second (default: 4)")
 	flag.Parse()
+
+	// Calculate refresh interval from refresh rate
+	refreshInterval := time.Second / time.Duration(*refreshRate)
 
 	// Initialize aggregator
 	agg := NewAggregator()
