@@ -29,8 +29,8 @@ const (
 	colPadding           = 6 // Total padding between columns
 )
 
-// RSSI threshold for near/far device separation
-const nearDeviceRssiLimit = -75
+// Time threshold for recent/stale device separation
+const recentDeviceThreshold = 10 * time.Second
 
 // TableState tracks scrolling and focus state for the tables
 type TableState struct {
@@ -194,15 +194,41 @@ func (a *Aggregator) GetSorted() []*BLEDevice {
 		devices = append(devices, dev)
 	}
 
-	// Sort by LastSeen descending (newest first), then by MAC address ascending
-	sort.Slice(devices, func(i, j int) bool {
-		if devices[i].LastSeen.Equal(devices[j].LastSeen) {
-			return devices[i].MacAddress < devices[j].MacAddress
+	now := time.Now().UTC()
+	var recentDevices, staleDevices []*BLEDevice
+
+	// Separate devices by last seen time
+	for _, dev := range devices {
+		if now.Sub(dev.LastSeen) <= recentDeviceThreshold {
+			recentDevices = append(recentDevices, dev)
+		} else {
+			staleDevices = append(staleDevices, dev)
 		}
-		return devices[i].LastSeen.After(devices[j].LastSeen)
+	}
+
+	// Sort recent devices alphabetically by MAC address
+	sort.Slice(recentDevices, func(i, j int) bool {
+		return recentDevices[i].MacAddress < recentDevices[j].MacAddress
 	})
 
-	return devices
+	// Sort stale devices by LastSeen descending (newest first), then by MAC address
+	sort.Slice(staleDevices, func(i, j int) bool {
+		// Truncate to 1-second precision for comparison
+		iTime := staleDevices[i].LastSeen.Truncate(time.Second)
+		jTime := staleDevices[j].LastSeen.Truncate(time.Second)
+
+		if iTime.Equal(jTime) {
+			return staleDevices[i].MacAddress < staleDevices[j].MacAddress
+		}
+		return iTime.After(jTime)
+	})
+
+	// Combine: recent devices first, then stale devices
+	result := make([]*BLEDevice, 0, len(devices))
+	result = append(result, recentDevices...)
+	result = append(result, staleDevices...)
+
+	return result
 }
 
 func (a *Aggregator) ExportJSON(filename string) error {
@@ -413,14 +439,15 @@ func drawTable(s tcell.Screen, devices []*BLEDevice, paused bool, state *TableSt
 		width - colWidthLastSeen - colWidthMAC - colWidthRSSI - colWidthName - colWidthServiceUUIDs - colWidthMfrCode - colPadding,
 	}
 
-	// Split devices into near and far based on RSSI
-	var nearDevices, farDevices []*BLEDevice
+	// Split devices into recent and stale based on last seen time
+	now := time.Now().UTC()
+	var recentDevices, staleDevices []*BLEDevice
 
 	for _, dev := range devices {
-		if dev.RSSI >= nearDeviceRssiLimit {
-			nearDevices = append(nearDevices, dev)
+		if now.Sub(dev.LastSeen) <= recentDeviceThreshold {
+			recentDevices = append(recentDevices, dev)
 		} else {
-			farDevices = append(farDevices, dev)
+			staleDevices = append(staleDevices, dev)
 		}
 	}
 
@@ -455,26 +482,26 @@ func drawTable(s tcell.Screen, devices []*BLEDevice, paused bool, state *TableSt
 
 	// Add focus indicator and scroll position
 	if state.focusedTable == "near" {
-		statusText += fmt.Sprintf(" | Focus: NEAR (row %d-%d of %d)",
+		statusText += fmt.Sprintf(" | Focus: RECENT (row %d-%d of %d)",
 			state.nearScrollOffset+1,
-			min(state.nearScrollOffset+nearTableHeight-2, len(nearDevices)),
-			len(nearDevices))
+			min(state.nearScrollOffset+nearTableHeight-2, len(recentDevices)),
+			len(recentDevices))
 	} else {
-		statusText += fmt.Sprintf(" | Focus: FAR (row %d-%d of %d)",
+		statusText += fmt.Sprintf(" | Focus: STALE (row %d-%d of %d)",
 			state.farScrollOffset+1,
-			min(state.farScrollOffset+(availableHeight-nearTableHeight)-2, len(farDevices)),
-			len(farDevices))
+			min(state.farScrollOffset+(availableHeight-nearTableHeight)-2, len(staleDevices)),
+			len(staleDevices))
 	}
 	drawText(s, 0, height-1, width, statusStyle, statusText)
 
-	// Draw near devices table
+	// Draw recent devices table
 	row := 0
 	isFocused := state.focusedTable == "near"
-	row = drawDeviceTable(s, nearDevices, colWidths, "NEAR DEVICES", row, nearTableHeight, state.nearScrollOffset, isFocused)
+	row = drawDeviceTable(s, recentDevices, colWidths, "RECENT DEVICES", row, nearTableHeight, state.nearScrollOffset, isFocused)
 
-	// Draw far devices table
+	// Draw stale devices table
 	isFocused = state.focusedTable == "far"
-	row = drawDeviceTable(s, farDevices, colWidths, "FAR DEVICES", row, availableHeight, state.farScrollOffset, isFocused)
+	row = drawDeviceTable(s, staleDevices, colWidths, "STALE DEVICES", row, availableHeight, state.farScrollOffset, isFocused)
 
 	// Draw disconnection modal overlay if not connected
 	if !connected {
