@@ -6,3 +6,5 @@
 .idea/
 vendor/
 results/
+ble_monitor/ble_monitor
+ble_monitor/ble_monitor.exe
