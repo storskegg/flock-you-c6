@@ -1,15 +1,22 @@
 package main
 
 import (
-	"encoding/json"
 	"os"
 	"sort"
 	"sync"
 	"time"
+
+	json "github.com/goccy/go-json"
 )
 
 // Time threshold for recent/stale device separation
 const recentDeviceThreshold = 10 * time.Second
+
+// SortedDevices holds recently seen and stale devices separately
+type SortedDevices struct {
+	Recent []*BLEDevice
+	Stale  []*BLEDevice
+}
 
 // Message represents both notification and BLE device messages
 type Message struct {
@@ -89,17 +96,21 @@ func (a *Aggregator) AddOrUpdate(device *BLEDevice) {
 	}
 }
 
-func (a *Aggregator) GetSorted() []*BLEDevice {
+func (a *Aggregator) GetSorted() *SortedDevices {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
-	devices := make([]*BLEDevice, 0, len(a.devices))
+	totalDevices := len(a.devices)
+	devices := make([]*BLEDevice, 0, totalDevices)
 	for _, dev := range a.devices {
 		devices = append(devices, dev)
 	}
 
 	now := time.Now().UTC()
-	var recentDevices, staleDevices []*BLEDevice
+
+	// Pre-allocate with capacity hints (estimate 50/50 split)
+	recentDevices := make([]*BLEDevice, 0, totalDevices/2)
+	staleDevices := make([]*BLEDevice, 0, totalDevices/2)
 
 	// Separate devices by last seen time
 	for _, dev := range devices {
@@ -115,28 +126,45 @@ func (a *Aggregator) GetSorted() []*BLEDevice {
 		return recentDevices[i].MacAddress < recentDevices[j].MacAddress
 	})
 
-	// Sort stale devices by LastSeen descending (newest first), then by MAC address
-	sort.Slice(staleDevices, func(i, j int) bool {
-		// Truncate to 1-second precision for comparison
-		iTime := staleDevices[i].LastSeen.Truncate(time.Second)
-		jTime := staleDevices[j].LastSeen.Truncate(time.Second)
-
-		if iTime.Equal(jTime) {
-			return staleDevices[i].MacAddress < staleDevices[j].MacAddress
+	// Pre-compute truncated times for stale devices to avoid repeated Truncate() calls
+	type cachedTime struct {
+		dev       *BLEDevice
+		truncTime time.Time
+	}
+	cached := make([]cachedTime, len(staleDevices))
+	for i, dev := range staleDevices {
+		cached[i] = cachedTime{
+			dev:       dev,
+			truncTime: dev.LastSeen.Truncate(time.Second),
 		}
-		return iTime.After(jTime)
+	}
+
+	// Sort stale devices by truncated LastSeen descending, then by MAC address
+	sort.Slice(cached, func(i, j int) bool {
+		if cached[i].truncTime.Equal(cached[j].truncTime) {
+			return cached[i].dev.MacAddress < cached[j].dev.MacAddress
+		}
+		return cached[i].truncTime.After(cached[j].truncTime)
 	})
 
-	// Combine: recent devices first, then stale devices
-	result := make([]*BLEDevice, 0, len(devices))
-	result = append(result, recentDevices...)
-	result = append(result, staleDevices...)
+	// Extract sorted devices back to staleDevices slice
+	for i, c := range cached {
+		staleDevices[i] = c.dev
+	}
 
-	return result
+	return &SortedDevices{
+		Recent: recentDevices,
+		Stale:  staleDevices,
+	}
 }
 
 func (a *Aggregator) ExportJSON(filename string) error {
-	devices := a.GetSorted()
+	sorted := a.GetSorted()
+
+	// Combine for export (recent first, then stale)
+	allDevices := make([]*BLEDevice, 0, len(sorted.Recent)+len(sorted.Stale))
+	allDevices = append(allDevices, sorted.Recent...)
+	allDevices = append(allDevices, sorted.Stale...)
 
 	file, err := os.Create(filename)
 	if err != nil {
@@ -146,7 +174,7 @@ func (a *Aggregator) ExportJSON(filename string) error {
 
 	encoder := json.NewEncoder(file)
 	encoder.SetIndent("", "  ")
-	return encoder.Encode(devices)
+	return encoder.Encode(allDevices)
 }
 
 func (a *Aggregator) Clear() {

@@ -2,13 +2,13 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"sync"
 	"time"
 
+	json "github.com/goccy/go-json"
 	"go.bug.st/serial"
 )
 
@@ -173,7 +173,8 @@ func readSerialLoop(reader io.ReadCloser, agg *Aggregator, paused *bool, pauseMu
 			return nil
 		default:
 			if scanner.Scan() {
-				line := scanner.Text()
+				// Use Bytes() instead of Text() to avoid allocation
+				line := scanner.Bytes()
 				// Process immediately in this goroutine for minimal latency
 				processSerialLine(line, agg, paused, pauseMu)
 			} else {
@@ -189,7 +190,7 @@ func readSerialLoop(reader io.ReadCloser, agg *Aggregator, paused *bool, pauseMu
 }
 
 // processSerialLine processes a single line of JSON
-func processSerialLine(line string, agg *Aggregator, paused *bool, pauseMu *sync.RWMutex) {
+func processSerialLine(line []byte, agg *Aggregator, paused *bool, pauseMu *sync.RWMutex) {
 	// Check if paused
 	pauseMu.RLock()
 	isPaused := *paused
@@ -200,7 +201,7 @@ func processSerialLine(line string, agg *Aggregator, paused *bool, pauseMu *sync
 	}
 
 	var msg Message
-	if err := json.Unmarshal([]byte(line), &msg); err != nil {
+	if err := json.Unmarshal(line, &msg); err != nil {
 		return // Silently ignore malformed JSON
 	}
 

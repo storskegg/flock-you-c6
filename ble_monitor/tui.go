@@ -26,7 +26,7 @@ type TableState struct {
 }
 
 // drawTable renders near devices, far devices, and special manufacturer tables to the screen
-func drawTable(s tcell.Screen, devices []*BLEDevice, paused bool, state *TableState, connState *ConnectionState) {
+func drawTable(s tcell.Screen, sorted *SortedDevices, paused bool, state *TableState, connState *ConnectionState) {
 	s.Clear()
 	width, height := s.Size()
 
@@ -43,17 +43,9 @@ func drawTable(s tcell.Screen, devices []*BLEDevice, paused bool, state *TableSt
 		width - colWidthLastSeen - colWidthMAC - colWidthSignal - colWidthRSSI - colWidthName - colWidthServiceUUIDs - colWidthMfrCode,
 	}
 
-	// Split devices into recent and stale based on last seen time
-	now := time.Now().UTC()
-	var recentDevices, staleDevices []*BLEDevice
-
-	for _, dev := range devices {
-		if now.Sub(dev.LastSeen) <= recentDeviceThreshold {
-			recentDevices = append(recentDevices, dev)
-		} else {
-			staleDevices = append(staleDevices, dev)
-		}
-	}
+	// Use pre-separated recent and stale devices from GetSorted()
+	recentDevices := sorted.Recent
+	staleDevices := sorted.Stale
 
 	// Calculate available height for near/far tables (minus status line)
 	availableHeight := height - 1

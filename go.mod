@@ -5,6 +5,7 @@ go 1.25.7
 require (
 	github.com/gdamore/tcell/v2 v2.13.8
 	github.com/gen2brain/beeep v0.11.2
+	github.com/goccy/go-json v0.10.5
 	go.bug.st/serial v1.6.4
 )
 

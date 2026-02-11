@@ -137,11 +137,11 @@ func handleHome(tableState *TableState) {
 
 // handleEnd scrolls the focused table to the bottom
 func handleEnd(tableState *TableState, agg *Aggregator) {
-	devices := agg.GetSorted()
+	sorted := agg.GetSorted()
 	if tableState.focusedTable == "near" {
-		tableState.nearScrollOffset = len(devices)
+		tableState.nearScrollOffset = len(sorted.Recent)
 	} else {
-		tableState.farScrollOffset = len(devices)
+		tableState.farScrollOffset = len(sorted.Stale)
 	}
 }
 
