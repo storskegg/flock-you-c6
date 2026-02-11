@@ -71,6 +71,11 @@ void reportDevice(const NimBLEAdvertisedDevice* dev) {
                                 (uint16_t)(uint8_t)mfrDataRaw[0];
     }
 
+    // return quick-ish if handling some unknown beacon
+    if (mfrCode == 0x4C) {
+        return;
+    }
+
     // Device MAC Address
     std::string addrStr = dev->getAddress().toString();
 
