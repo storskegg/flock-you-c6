@@ -22,11 +22,12 @@ import (
 const (
 	colWidthLastSeen     = 21 // "YYYY-MM-DD hh:mm:ss" + padding
 	colWidthMAC          = 19
+	colWidthSignal       = 7 // Signal strength indicator
 	colWidthRSSI         = 6
 	colWidthName         = 30
 	colWidthServiceUUIDs = 38 // Fixed width, moved between Name and MfrCode
 	colWidthMfrCode      = 8
-	colPadding           = 6 // Total padding between columns
+	colPadding           = 7 // Total padding between columns
 )
 
 // Time threshold for recent/stale device separation
@@ -428,15 +429,16 @@ func drawTable(s tcell.Screen, devices []*BLEDevice, paused bool, state *TableSt
 	width, height := s.Size()
 
 	// Calculate column widths using constants
-	// Order: Last Seen, MAC, RSSI, Name, Service UUIDs, Mfr Code, Mfr Data (variable)
+	// Order: Last Seen, MAC, Signal, RSSI, Name, Service UUIDs, Mfr ID, Mfr Data (variable)
 	colWidths := []int{
 		colWidthLastSeen,
 		colWidthMAC,
+		colWidthSignal,
 		colWidthRSSI,
 		colWidthName,
 		colWidthServiceUUIDs,
 		colWidthMfrCode,
-		width - colWidthLastSeen - colWidthMAC - colWidthRSSI - colWidthName - colWidthServiceUUIDs - colWidthMfrCode - colPadding,
+		width - colWidthLastSeen - colWidthMAC - colWidthSignal - colWidthRSSI - colWidthName - colWidthServiceUUIDs - colWidthMfrCode - colPadding,
 	}
 
 	// Split devices into recent and stale based on last seen time
@@ -532,7 +534,7 @@ func drawDeviceTable(s tcell.Screen, devices []*BLEDevice, colWidths []int, titl
 
 	// Draw header
 	headerStyle := tcell.StyleDefault.Bold(true).Background(tcell.ColorNavy).Foreground(tcell.ColorWhite)
-	headers := []string{"Last Seen", "MAC Address", "RSSI", "Device Name", "Service UUIDs", "Mfr ID", "Mfr Data"}
+	headers := []string{"Last Seen", "MAC Address", "Sig", "RSSI", "Device Name", "Service UUIDs", "Mfr ID", "Mfr Data"}
 
 	col := 0
 	for i, header := range headers {
@@ -578,16 +580,21 @@ func drawDeviceTable(s tcell.Screen, devices []*BLEDevice, colWidths []int, titl
 		// Draw MAC address
 		drawText(s, colWidths[0], row, colWidths[1], normalStyle, dev.MacAddress)
 
+		// Draw Signal strength indicator
+		signalIndicator, signalColor := getSignalIndicator(dev.RSSI)
+		signalStyle := tcell.StyleDefault.Foreground(signalColor).Background(tcell.ColorBlack)
+		drawText(s, colWidths[0]+colWidths[1], row, colWidths[2], signalStyle, signalIndicator)
+
 		// Draw RSSI
-		drawText(s, colWidths[0]+colWidths[1], row, colWidths[2], normalStyle, fmt.Sprintf("%d", dev.RSSI))
+		drawText(s, colWidths[0]+colWidths[1]+colWidths[2], row, colWidths[3], normalStyle, fmt.Sprintf("%d", dev.RSSI))
 
 		// Draw device name
-		drawText(s, colWidths[0]+colWidths[1]+colWidths[2], row, colWidths[3], normalStyle, dev.DeviceName)
+		drawText(s, colWidths[0]+colWidths[1]+colWidths[2]+colWidths[3], row, colWidths[4], normalStyle, dev.DeviceName)
 
 		// Draw service UUIDs (multi-line with ellipsis support) - now fixed width at 38 chars
-		uuidCol := colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3]
+		uuidCol := colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3] + colWidths[4]
 		if len(dev.ServiceUUIDs) == 0 {
-			drawText(s, uuidCol, row, colWidths[4], normalStyle, "")
+			drawText(s, uuidCol, row, colWidths[5], normalStyle, "")
 		} else {
 			for j, uuid := range dev.ServiceUUIDs {
 				if row+j >= maxRow {
@@ -595,10 +602,10 @@ func drawDeviceTable(s tcell.Screen, devices []*BLEDevice, colWidths []int, titl
 				}
 				// Ellipsize if UUID is longer than column width
 				displayUUID := uuid
-				if len(uuid) > colWidths[4] && colWidths[4] > 3 {
-					displayUUID = uuid[:colWidths[4]-3] + "..."
+				if len(uuid) > colWidths[5] && colWidths[5] > 3 {
+					displayUUID = uuid[:colWidths[5]-3] + "..."
 				}
-				drawText(s, uuidCol, row+j, colWidths[4], normalStyle, displayUUID)
+				drawText(s, uuidCol, row+j, colWidths[5], normalStyle, displayUUID)
 			}
 		}
 
@@ -607,11 +614,11 @@ func drawDeviceTable(s tcell.Screen, devices []*BLEDevice, colWidths []int, titl
 		if dev.MfrCode != 0 {
 			mfrCodeStr = fmt.Sprintf("%d", dev.MfrCode)
 		}
-		drawText(s, colWidths[0]+colWidths[1]+colWidths[2]+colWidths[3]+colWidths[4], row, colWidths[5], normalStyle, mfrCodeStr)
+		drawText(s, colWidths[0]+colWidths[1]+colWidths[2]+colWidths[3]+colWidths[4]+colWidths[5], row, colWidths[6], normalStyle, mfrCodeStr)
 
 		// Draw Mfr Data (variable width - fills remaining space)
-		mfrDataCol := colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3] + colWidths[4] + colWidths[5]
-		drawText(s, mfrDataCol, row, colWidths[6], normalStyle, dev.MfrData)
+		mfrDataCol := colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3] + colWidths[4] + colWidths[5] + colWidths[6]
+		drawText(s, mfrDataCol, row, colWidths[7], normalStyle, dev.MfrData)
 
 		row += uuidLines
 	}
@@ -655,6 +662,49 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// getSignalIndicator returns a visual signal strength indicator based on RSSI
+// Returns the indicator string and the color to use
+func getSignalIndicator(rssi int) (string, tcell.Color) {
+	var bars int
+	var color tcell.Color
+
+	// Determine color and number of bars based on RSSI thresholds
+	if rssi > -50 {
+		// Excellent - Blue - 7 bars
+		bars = 7
+		color = tcell.ColorBlue
+	} else if rssi > -60 {
+		// Good - Green - 6 bars
+		bars = 6
+		color = tcell.ColorGreen
+	} else if rssi > -70 {
+		// Fair - Yellow - 4 bars
+		bars = 4
+		color = tcell.ColorYellow
+	} else if rssi > -80 {
+		// Poor - Orange - 2 bars
+		bars = 2
+		color = tcell.ColorOrange
+	} else {
+		// Very Poor - Red - 1 bar
+		bars = 1
+		color = tcell.ColorRed
+	}
+
+	// Build the indicator string using UTF-8 box-drawing characters
+	// Full block: ▮ (U+25AE) for filled
+	// Light shade: ░ (U+2591) for empty
+	indicator := ""
+	for i := 0; i < bars; i++ {
+		indicator += "▮"
+	}
+	for i := bars; i < 7; i++ {
+		indicator += "░"
+	}
+
+	return indicator, color
 }
 
 // drawDisconnectionModal draws a centered modal overlay showing connection status
