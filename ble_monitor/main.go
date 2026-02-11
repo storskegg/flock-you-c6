@@ -52,6 +52,7 @@ type ConnectionState struct {
 	lastError     error
 	lastErrorTime time.Time
 	totalAttempts int
+	modalShown    bool // Track if disconnection modal is currently displayed
 }
 
 func (cs *ConnectionState) SetConnected(connected bool) {
@@ -75,6 +76,18 @@ func (cs *ConnectionState) GetStatus() (bool, error, time.Time, int) {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.connected, cs.lastError, cs.lastErrorTime, cs.totalAttempts
+}
+
+func (cs *ConnectionState) SetModalShown(shown bool) {
+	cs.mu.Lock()
+	cs.modalShown = shown
+	cs.mu.Unlock()
+}
+
+func (cs *ConnectionState) IsModalShown() bool {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.modalShown
 }
 
 // Sound notification functions - all run in goroutines to avoid blocking
@@ -477,6 +490,12 @@ func drawTable(s tcell.Screen, devices []*BLEDevice, paused bool, state *TableSt
 	// Draw special manufacturer table at the bottom (just above status line)
 	drawSpecialMfrTable(s, specialMfrMACs, row, height-1)
 
+	// Draw disconnection modal overlay if not connected
+	connected, _, _, _ = connState.GetStatus()
+	if !connected {
+		drawDisconnectionModal(s, connState)
+	}
+
 	s.Show()
 }
 
@@ -697,6 +716,97 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// drawDisconnectionModal draws a centered modal overlay showing connection status
+func drawDisconnectionModal(s tcell.Screen, connState *ConnectionState) {
+	width, height := s.Size()
+
+	// Modal dimensions
+	modalWidth := 50
+	modalHeight := 8
+	modalX := (width - modalWidth) / 2
+	modalY := (height - modalHeight) / 2
+
+	// Get connection status
+	_, _, lastErrTime, attempts := connState.GetStatus()
+	elapsed := time.Since(lastErrTime).Round(time.Second)
+
+	// Styles
+	borderStyle := tcell.StyleDefault.Foreground(tcell.ColorRed).Background(tcell.ColorBlack).Bold(true)
+	bgStyle := tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorDarkRed)
+	textStyle := tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorDarkRed)
+	buttonStyle := tcell.StyleDefault.Foreground(tcell.ColorBlack).Background(tcell.ColorWhite).Bold(true)
+
+	// Draw background overlay (dim the screen)
+	dimStyle := tcell.StyleDefault.Foreground(tcell.ColorGray).Background(tcell.ColorBlack)
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			if y >= modalY && y < modalY+modalHeight && x >= modalX && x < modalX+modalWidth {
+				continue // Skip modal area
+			}
+			// Dim the background
+			mainc, combc, _, _ := s.GetContent(x, y)
+			s.SetContent(x, y, mainc, combc, dimStyle)
+		}
+	}
+
+	// Draw modal background
+	for y := modalY; y < modalY+modalHeight; y++ {
+		for x := modalX; x < modalX+modalWidth; x++ {
+			s.SetContent(x, y, ' ', nil, bgStyle)
+		}
+	}
+
+	// Draw border
+	// Top and bottom borders
+	for x := modalX; x < modalX+modalWidth; x++ {
+		s.SetContent(x, modalY, '═', nil, borderStyle)
+		s.SetContent(x, modalY+modalHeight-1, '═', nil, borderStyle)
+	}
+	// Side borders
+	for y := modalY; y < modalY+modalHeight; y++ {
+		s.SetContent(modalX, y, '║', nil, borderStyle)
+		s.SetContent(modalX+modalWidth-1, y, '║', nil, borderStyle)
+	}
+	// Corners
+	s.SetContent(modalX, modalY, '╔', nil, borderStyle)
+	s.SetContent(modalX+modalWidth-1, modalY, '╗', nil, borderStyle)
+	s.SetContent(modalX, modalY+modalHeight-1, '╚', nil, borderStyle)
+	s.SetContent(modalX+modalWidth-1, modalY+modalHeight-1, '╝', nil, borderStyle)
+
+	// Draw title
+	title := " CONNECTION LOST "
+	titleX := modalX + (modalWidth-len(title))/2
+	for i, ch := range title {
+		s.SetContent(titleX+i, modalY+1, ch, nil, borderStyle)
+	}
+
+	// Draw status text
+	line1 := "Serial connection interrupted!"
+	line2 := fmt.Sprintf("Reconnection attempt: %d", attempts)
+	line3 := fmt.Sprintf("Time since last attempt: %v", elapsed)
+
+	drawCenteredText(s, modalX, modalY+3, modalWidth, textStyle, line1)
+	drawCenteredText(s, modalX, modalY+4, modalWidth, textStyle, line2)
+	drawCenteredText(s, modalX, modalY+5, modalWidth, textStyle, line3)
+
+	// Draw button
+	button := " [Q] Quit "
+	buttonX := modalX + (modalWidth-len(button))/2
+	for i, ch := range button {
+		s.SetContent(buttonX+i, modalY+modalHeight-2, ch, nil, buttonStyle)
+	}
+}
+
+// drawCenteredText draws text centered within a given width
+func drawCenteredText(s tcell.Screen, x, y, width int, style tcell.Style, text string) {
+	textX := x + (width-len(text))/2
+	for i, ch := range text {
+		if textX+i >= x && textX+i < x+width {
+			s.SetContent(textX+i, y, ch, nil, style)
+		}
+	}
 }
 
 func main() {
