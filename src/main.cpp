@@ -108,7 +108,7 @@ void setup() {
 
     Serial.begin(115200);
     delay(500);
-    Serial.println("Scanning...");
+    Serial.println("{\"notification\":\"initializing ble scanner...\"}");
 
     NimBLEDevice::init("");
     NimBLEDevice::setScanDuplicateCacheSize(50);
@@ -123,7 +123,7 @@ void setup() {
     // Kick off the first scan right away
     fyBLEScan->start(BLE_SCAN_DURATION, false, true);
     fyLastBleScan = millis();
-    printf("[FLOCK-YOU] BLE scanning ACTIVE\n");
+    printf("{\"notification\":\"BLE scanning ACTIVE\"}\n");
 }
 
 void loop() {
