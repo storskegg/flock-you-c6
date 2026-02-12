@@ -490,16 +490,9 @@ func (a *Aggregator) ExportKML(filename string) error {
 
 // mergeKMLAndExit merges multiple KML files and writes the result
 // Called from main when -merge-kml flag is used
-func mergeKMLAndExit(filesArg string) error {
-	// Parse comma-separated file paths
-	filePaths := strings.Split(filesArg, ",")
+func mergeKMLAndExit(filePaths []string) error {
 	if len(filePaths) == 0 {
 		return fmt.Errorf("no files specified")
-	}
-
-	// Trim whitespace from paths
-	for i := range filePaths {
-		filePaths[i] = strings.TrimSpace(filePaths[i])
 	}
 
 	fmt.Printf("Merging %d KML files...\n", len(filePaths))
