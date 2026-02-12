@@ -82,7 +82,7 @@ func readSerial(portPath string, baudRate int, agg *Aggregator, paused *bool, pa
 
 	// For serial ports, implement reconnection logic
 	reconnectDelay := 1 * time.Second
-	maxReconnectDelay := 30 * time.Second
+	maxReconnectDelay := 5 * time.Second
 
 	for {
 		select {
@@ -119,7 +119,7 @@ func readSerial(portPath string, baudRate int, agg *Aggregator, paused *bool, pa
 				return
 			case <-time.After(reconnectDelay):
 				// Exponential backoff, max 30 seconds
-				reconnectDelay *= 2
+				reconnectDelay += 1
 				if reconnectDelay > maxReconnectDelay {
 					reconnectDelay = maxReconnectDelay
 				}
