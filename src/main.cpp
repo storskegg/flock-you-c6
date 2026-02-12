@@ -2,7 +2,7 @@
 #include <base64.h>
 #include <NimBLEDevice.h>
 #include <NimBLEAdvertisedDevice.h>
-#include "NimBLEEddystoneTLM.h"
+// #include "NimBLEEddystoneTLM.h"
 // #include "NimBLEBeacon.h"
 
 // #define ENDIAN_CHANGE_U16(x) ((((x) & 0xFF00) >> 8) + (((x) & 0xFF) << 8))
@@ -22,10 +22,62 @@
     #error You must select INTERNAL or EXTERNAL antenna, not both
 #endif
 
-static NimBLEScan* fyBLEScan = NULL;
+//////////////////////////////////////
+// PerfectHashSet
+
+namespace lookup {
+
+    // Perfect Hash Set - O(1) lookup
+    class PerfectHashSet {
+    private:
+        // Your strings - replace with actual values
+        static constexpr const char* entries_[] = {
+            "0xfe0f"    // Phillips Lighting
+        };
+
+        static constexpr uint8_t size_ = std::size(entries_);
+
+    public:
+        // Check if string exists - O(1)
+        static bool contains(const char* str) {
+            for (const auto entry : entries_) {
+                if (strcmp(entry, str) == 0) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Get index if exists - returns -1 if not found
+        static int8_t index_of(const char* str) {
+            for (int8_t i = 0; i < size_; i++) {
+                if (strcmp(entries_[i], str) == 0) {
+                    return i;
+                }
+            }
+            return -1;
+        }
+
+        // Get string by index
+        static const char* at(const uint8_t idx) {
+            return idx < size_ ? entries_[idx] : nullptr;
+        }
+
+        static constexpr uint8_t size() { return size_; }
+    };
+
+    // Initialize the static member
+    constexpr const char* PerfectHashSet::entries_[];
+
+} // namespace lookup
+
+
+//////////////////////////////////
+
+static NimBLEScan* fyBLEScan = nullptr;
 static unsigned long fyLastBleScan = 0;
 
-void cfg_antenna(void) {
+void cfg_antenna() {
 #ifdef ANTENNA_USE_INTERNAL
     pinMode(WIFI_ENABLE, OUTPUT);
     digitalWrite(WIFI_ENABLE, LOW);
@@ -39,59 +91,61 @@ void cfg_antenna(void) {
 #endif
 }
 
-static std::string getUUID(const NimBLEAdvertisedDevice* device) {
-    if (!device || !device->haveServiceUUID()) return "[]";
-    int count = device->getServiceUUIDCount();
-    if (count == 0) return "[]";
-    int lastIdx = count-1;
+static std::tuple<bool, std::string> getUUIDs(const NimBLEAdvertisedDevice* device) {
+    if (!device || !device->haveServiceUUID()) return {false, "[]"};
+    const int count = device->getServiceUUIDCount();
+    if (count == 0) return {false, "[]"};;
+    const int lastIdx = count-1;
     std::string uids = "[";
     for (int i = 0; i < count; i++) {
-        NimBLEUUID svc = device->getServiceUUID(i);
-        uids += "\"" + svc.toString() + "\"";
+        std::string svc = device->getServiceUUID(i).toString();
+        if (lookup::PerfectHashSet::contains(svc.c_str())) {
+            return {true, ""};
+        }
+        uids += "\"" + svc + "\"";
         if (i != lastIdx) uids += ",";
     }
     uids += "]";
-    return uids;
+    return {false, uids};
 }
 
 void reportDevice(const NimBLEAdvertisedDevice* dev) {
-    std::string mfrDataRaw = dev->getManufacturerData();
+    const std::string mfrDataRaw = dev->getManufacturerData();
 
     // return quick if we're handling an iBeacon; they're just noise
     if (mfrDataRaw.length() == 25 && mfrDataRaw[0] == 0x4C && mfrDataRaw[1] == 0x00) {
         return;
     }
 
-    std::string mfrDataB64 = mfrDataRaw.length() > 0 ? Base64::encode(mfrDataRaw) : "";
-
     // derive manufacturer code from mfr data, if present
     uint16_t mfrCode = 0;
     if (mfrDataRaw.length() > 1) {
-        mfrCode = ((uint16_t)(uint8_t)mfrDataRaw[1] << 8) |
-                                (uint16_t)(uint8_t)mfrDataRaw[0];
+        mfrCode = (static_cast<uint16_t>(static_cast<uint8_t>(mfrDataRaw[1])) << 8) |
+                                static_cast<uint16_t>(static_cast<uint8_t>(mfrDataRaw[0]));
     }
 
     // return quick-ish if handling some unknown beacon
-    if (mfrCode == 0x4C) {
+    if (mfrCode == 0x004C) {
         return;
     }
+
+    auto [omit, serviceUuids] = getUUIDs(dev);
+
+    const std::string mfrDataB64 = !mfrDataRaw.empty() ? Base64::encode(mfrDataRaw) : "";
 
     // Device MAC Address
     std::string addrStr = dev->getAddress().toString();
 
     // Device RSSI
-    int rssi = dev->getRSSI();
+    const int8_t rssi = dev->getRSSI();
 
     // Device Name
-    std::string name = dev->haveName() ? dev->getName() : "";
+    const std::string name = dev->haveName() ? dev->getName() : "";
 
-    // Device Service UUID
-    std::string serviceUuid = getUUID(dev);
-
-    printf("{\"mac_address\":\"%s\",\"rssi\":%d,\"mfr_code\":%lu,"
+    printf("{\"mac_address\":\"%s\",\"rssi\":%d,\"mfr_code\":%u,"
             "\"device_name\":\"%s\","
             "\"service_uuids\":%s,\"mfr_data\":\"%s\"}\n",
-            addrStr.c_str(), rssi, mfrCode, name.c_str(), serviceUuid.c_str(), mfrDataB64.c_str());
+            addrStr.c_str(), rssi, mfrCode, name.c_str(), serviceUuids.c_str(), mfrDataB64.c_str());
 }
 
 class FYBLECallbacks : public NimBLEScanCallbacks {
@@ -108,7 +162,7 @@ class FYBLECallbacks : public NimBLEScanCallbacks {
     //     reportDevice(dev);
     // }
 
-    void onScanEnd(const NimBLEScanResults& results, int reason) override {
+    void onScanEnd(const NimBLEScanResults& results, const int reason) override {
         printf("{\"notification\": \"Scan ended reason = %d; restarting scan\"}\n", reason);
         NimBLEDevice::getScan()->start(BLE_SCAN_DURATION * 1000, false, true);
     }
@@ -120,7 +174,7 @@ void setup() {
 
     Serial.begin(115200);
     delay(500);
-    Serial.println("{\"notification\":\"initializing ble scanner...\"}");
+    Serial.println(R"({"notification":"initializing ble scanner..."})");
 
     NimBLEDevice::init("");
     NimBLEDevice::setScanDuplicateCacheSize(50);
