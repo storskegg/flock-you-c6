@@ -67,91 +67,57 @@ func (rb *RingBuffer[T]) Size() int {
 	return rb.size
 }
 
-// RSSILocationMap maintains geo locations for the top 3 observed RSSI values
-// Each RSSI gets a ring buffer of recent locations
+// RSSILocationMap maintains geo locations for ALL observed RSSI values
+// Each RSSI gets a ring buffer of up to 13 recent locations
 type RSSILocationMap struct {
-	mu       sync.RWMutex
-	data     map[int]*RingBuffer[GeoLocation]
-	topRSSIs []int // Sorted descending (highest first), max 3 entries
+	mu          sync.RWMutex
+	data        map[int]*RingBuffer[GeoLocation]
+	allRSSIs    []int // All RSSIs sorted descending (highest first)
+	highestRSSI int   // Cached highest RSSI for quick access
 }
 
 // NewRSSILocationMap creates a new RSSI location map
 func NewRSSILocationMap() *RSSILocationMap {
 	return &RSSILocationMap{
-		data:     make(map[int]*RingBuffer[GeoLocation]),
-		topRSSIs: make([]int, 0, 3),
+		data:        make(map[int]*RingBuffer[GeoLocation]),
+		allRSSIs:    make([]int, 0),
+		highestRSSI: -2147483648, // Min int32
 	}
 }
 
 // Push adds a location for the given RSSI
-// Only the top 3 RSSIs are kept; lower RSSIs are ignored
+// All RSSIs are kept, not just top 3
 func (rlm *RSSILocationMap) Push(rssi int, loc GeoLocation) {
 	rlm.mu.Lock()
 	defer rlm.mu.Unlock()
 
-	// Check if this RSSI is in the top 3
-	isTop3 := false
-	position := -1
-
-	for i, topRSSI := range rlm.topRSSIs {
-		if rssi == topRSSI {
-			// Already in top 3
-			isTop3 = true
-			position = i
-			break
-		} else if rssi > topRSSI {
-			// New RSSI is higher than this one
-			isTop3 = true
-			position = i
-			break
-		}
-	}
-
-	// If not in top 3 and we already have 3, check if it's higher than the lowest
-	if !isTop3 && len(rlm.topRSSIs) < 3 {
-		isTop3 = true
-		position = len(rlm.topRSSIs)
-	}
-
-	// If not worthy of top 3, discard
-	if !isTop3 {
-		return
-	}
-
-	// If RSSI already exists in top 3 (found in loop), just push to its buffer
-	if position >= 0 && position < len(rlm.topRSSIs) && rssi == rlm.topRSSIs[position] {
-		// RSSI already exists, buffer should exist too
-		if rlm.data[rssi] != nil {
-			rlm.data[rssi].Push(loc)
-		}
-		return
-	}
-
-	// New RSSI needs to be inserted at position
-	// Create buffer if it doesn't exist
+	// Create buffer if this RSSI doesn't exist yet
 	if _, exists := rlm.data[rssi]; !exists {
-		rlm.data[rssi] = NewRingBuffer[GeoLocation](3) // Capacity of 3 per RSSI
-	}
-	rlm.data[rssi].Push(loc)
+		rlm.data[rssi] = NewRingBuffer[GeoLocation](13) // Capacity of 13 per RSSI
 
-	// Update topRSSIs list
-	if len(rlm.topRSSIs) < 3 {
-		// Less than 3 entries, insert at position
-		rlm.topRSSIs = append(rlm.topRSSIs, 0)
-		copy(rlm.topRSSIs[position+1:], rlm.topRSSIs[position:])
-		rlm.topRSSIs[position] = rssi
-	} else {
-		// Already have 3, need to evict the lowest if this is higher
-		if position < 3 {
-			// Remove the lowest RSSI's data
-			lowestRSSI := rlm.topRSSIs[2]
-			delete(rlm.data, lowestRSSI)
+		// Add to sorted list
+		// Find insertion position
+		position := len(rlm.allRSSIs)
+		for i, existingRSSI := range rlm.allRSSIs {
+			if rssi > existingRSSI {
+				position = i
+				break
+			}
+		}
 
-			// Shift and insert
-			copy(rlm.topRSSIs[position+1:], rlm.topRSSIs[position:2])
-			rlm.topRSSIs[position] = rssi
+		// Insert at position
+		rlm.allRSSIs = append(rlm.allRSSIs, 0)
+		copy(rlm.allRSSIs[position+1:], rlm.allRSSIs[position:])
+		rlm.allRSSIs[position] = rssi
+
+		// Update highest RSSI if needed
+		if rssi > rlm.highestRSSI {
+			rlm.highestRSSI = rssi
 		}
 	}
+
+	// Push location to this RSSI's buffer
+	rlm.data[rssi].Push(loc)
 }
 
 // GetLocation returns the mean location of all entries in the highest RSSI's buffer
@@ -161,12 +127,12 @@ func (rlm *RSSILocationMap) GetLocation() *GeoLocation {
 	rlm.mu.RLock()
 	defer rlm.mu.RUnlock()
 
-	if len(rlm.topRSSIs) == 0 {
+	if len(rlm.allRSSIs) == 0 {
 		return nil
 	}
 
 	// Try each RSSI in order (highest to lowest) until we find one with data
-	for _, rssi := range rlm.topRSSIs {
+	for _, rssi := range rlm.allRSSIs {
 		buffer := rlm.data[rssi]
 
 		if buffer == nil || buffer.Size() == 0 {

@@ -26,8 +26,45 @@ type TableState struct {
 	focusedTable     string // "near" or "far"
 }
 
+// ExportModalState tracks the export modal state
+type ExportModalState struct {
+	showing        bool
+	selectedOption int // 0 = JSON, 1 = KML
+}
+
+// ShowExportModal displays the export modal
+func (e *ExportModalState) Show() {
+	e.showing = true
+	e.selectedOption = 0 // Default to JSON
+}
+
+// Hide hides the export modal
+func (e *ExportModalState) Hide() {
+	e.showing = false
+}
+
+// IsShowing returns whether the modal is currently visible
+func (e *ExportModalState) IsShowing() bool {
+	return e.showing
+}
+
+// SelectNext moves selection to next option (with wrap)
+func (e *ExportModalState) SelectNext() {
+	e.selectedOption = (e.selectedOption + 1) % 2
+}
+
+// SelectPrev moves selection to previous option (with wrap)
+func (e *ExportModalState) SelectPrev() {
+	e.selectedOption = (e.selectedOption - 1 + 2) % 2
+}
+
+// GetSelected returns the currently selected option (0 = JSON, 1 = KML)
+func (e *ExportModalState) GetSelected() int {
+	return e.selectedOption
+}
+
 // drawTable renders near devices, far devices, and special manufacturer tables to the screen
-func drawTable(s tcell.Screen, sorted *SortedDevices, paused bool, state *TableState, connState *ConnectionState, locState *LocationState) {
+func drawTable(s tcell.Screen, sorted *SortedDevices, paused bool, state *TableState, connState *ConnectionState, locState *LocationState, exportModal *ExportModalState) {
 	s.Clear()
 	width, height := s.Size()
 
@@ -134,6 +171,11 @@ func drawTable(s tcell.Screen, sorted *SortedDevices, paused bool, state *TableS
 	// Draw GPS reconnection modal if GPS is reconnecting and not dismissed
 	if locState.ShouldShowGPSReconnectModal() {
 		drawGPSReconnectionModal(s, locState)
+	}
+
+	// Draw export modal if showing
+	if exportModal.IsShowing() {
+		drawExportModal(s, exportModal)
 	}
 
 	s.Show()
@@ -558,4 +600,85 @@ func drawGPSReconnectionModal(s tcell.Screen, locState *LocationState) {
 	drawCenteredText(s, modalX, modalY+4, modalWidth, textStyle, line2)
 	drawCenteredText(s, modalX, modalY+5, modalWidth, textStyle, line3)
 	drawCenteredText(s, modalX, modalY+6, modalWidth, textStyle, line4)
+}
+
+// drawExportModal draws the export options modal
+func drawExportModal(s tcell.Screen, exportModal *ExportModalState) {
+	width, height := s.Size()
+
+	// Modal dimensions
+	modalWidth := 50
+	modalHeight := 10
+	modalX := (width - modalWidth) / 2
+	modalY := (height - modalHeight) / 2
+
+	// Styles
+	borderStyle := tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorBlue).Bold(true)
+	bgStyle := tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorBlue)
+	buttonNormal := tcell.StyleDefault.Foreground(tcell.ColorBlack).Background(tcell.ColorWhite)
+	buttonSelected := tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorGreen).Bold(true)
+
+	// Draw modal background
+	for y := modalY; y < modalY+modalHeight; y++ {
+		for x := modalX; x < modalX+modalWidth; x++ {
+			s.SetContent(x, y, ' ', nil, bgStyle)
+		}
+	}
+
+	// Draw border
+	for x := modalX; x < modalX+modalWidth; x++ {
+		s.SetContent(x, modalY, '═', nil, borderStyle)
+		s.SetContent(x, modalY+modalHeight-1, '═', nil, borderStyle)
+	}
+	for y := modalY; y < modalY+modalHeight; y++ {
+		s.SetContent(modalX, y, '║', nil, borderStyle)
+		s.SetContent(modalX+modalWidth-1, y, '║', nil, borderStyle)
+	}
+	s.SetContent(modalX, modalY, '╔', nil, borderStyle)
+	s.SetContent(modalX+modalWidth-1, modalY, '╗', nil, borderStyle)
+	s.SetContent(modalX, modalY+modalHeight-1, '╚', nil, borderStyle)
+	s.SetContent(modalX+modalWidth-1, modalY+modalHeight-1, '╝', nil, borderStyle)
+
+	// Draw title
+	title := " EXPORT OPTIONS "
+	titleX := modalX + (modalWidth-len(title))/2
+	for i, ch := range title {
+		s.SetContent(titleX+i, modalY+1, ch, nil, borderStyle)
+	}
+
+	// Draw instructions
+	instruction := "Select export format:"
+	drawCenteredText(s, modalX, modalY+3, modalWidth, bgStyle, instruction)
+
+	// Draw buttons
+	buttonY := modalY + 5
+	selected := exportModal.GetSelected()
+
+	// JSON button
+	jsonButton := "[J] Export JSON"
+	jsonStyle := buttonNormal
+	if selected == 0 {
+		jsonStyle = buttonSelected
+		jsonButton = "► [J] Export JSON ◄"
+	}
+	jsonX := modalX + (modalWidth-len(jsonButton))/2
+	for i, ch := range jsonButton {
+		s.SetContent(jsonX+i, buttonY, ch, nil, jsonStyle)
+	}
+
+	// KML button
+	kmlButton := "[K] Export KML"
+	kmlStyle := buttonNormal
+	if selected == 1 {
+		kmlStyle = buttonSelected
+		kmlButton = "► [K] Export KML ◄"
+	}
+	kmlX := modalX + (modalWidth-len(kmlButton))/2
+	for i, ch := range kmlButton {
+		s.SetContent(kmlX+i, buttonY+2, ch, nil, kmlStyle)
+	}
+
+	// Draw navigation hint
+	hint := "↑↓/Tab: Navigate | Enter: Select | ESC: Cancel"
+	drawCenteredText(s, modalX, modalY+modalHeight-2, modalWidth, bgStyle, hint)
 }

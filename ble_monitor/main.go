@@ -71,6 +71,12 @@ func main() {
 		focusedTable:     "near",
 	}
 
+	// Initialize export modal state
+	exportModal := &ExportModalState{
+		showing:        false,
+		selectedOption: 0,
+	}
+
 	// Handle signals
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -80,7 +86,7 @@ func main() {
 	defer ticker.Stop()
 
 	// Initial draw
-	drawTable(s, agg.GetSorted(), paused, tableState, connState, locState)
+	drawTable(s, agg.GetSorted(), paused, tableState, connState, locState, exportModal)
 
 	// Event loop
 	quit := false
@@ -90,7 +96,7 @@ func main() {
 			pauseMu.RLock()
 			isPaused := paused
 			pauseMu.RUnlock()
-			drawTable(s, agg.GetSorted(), isPaused, tableState, connState, locState)
+			drawTable(s, agg.GetSorted(), isPaused, tableState, connState, locState, exportModal)
 
 		case <-sigChan:
 			quit = true
@@ -101,13 +107,13 @@ func main() {
 				ev := s.PollEvent()
 				switch ev := ev.(type) {
 				case *tcell.EventKey:
-					if handleKeyboardEvent(ev, agg, &paused, &pauseMu, tableState, connState, locState, s) {
+					if handleKeyboardEvent(ev, agg, &paused, &pauseMu, tableState, connState, locState, exportModal, s) {
 						quit = true
 					}
 				case *tcell.EventMouse:
-					handleMouseEvent(ev, tableState, agg, paused, s, connState, locState)
+					handleMouseEvent(ev, tableState, agg, paused, s, connState, locState, exportModal)
 				case *tcell.EventResize:
-					handleResizeEvent(s, agg, &paused, &pauseMu, tableState, connState, locState)
+					handleResizeEvent(s, agg, &paused, &pauseMu, tableState, connState, locState, exportModal)
 				}
 			}
 			time.Sleep(10 * time.Millisecond)

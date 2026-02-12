@@ -7,6 +7,7 @@ require (
 	github.com/gdamore/tcell/v2 v2.13.8
 	github.com/gen2brain/beeep v0.11.2
 	github.com/goccy/go-json v0.10.5
+	github.com/twpayne/go-kml/v3 v3.6.0
 	go.bug.st/serial v1.6.4
 )
 
