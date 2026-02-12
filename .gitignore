@@ -9,3 +9,5 @@ results/
 ble_monitor/ble_monitor
 ble_monitor/ble_monitor.exe
 .DS_Store
+ble_monitor/*.json
+ble_monitor/*.kml
