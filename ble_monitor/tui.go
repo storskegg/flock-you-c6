@@ -13,6 +13,7 @@ const (
 	colWidthMAC          = 19
 	colWidthSignal       = 9 // Signal strength indicator
 	colWidthRSSI         = 6
+	colWidthLocation     = 27 // Location (lat, lon) with 5 decimal places
 	colWidthName         = 30
 	colWidthServiceUUIDs = 38 // Fixed width, moved between Name and MfrCode
 	colWidthMfrCode      = 8
@@ -26,21 +27,22 @@ type TableState struct {
 }
 
 // drawTable renders near devices, far devices, and special manufacturer tables to the screen
-func drawTable(s tcell.Screen, sorted *SortedDevices, paused bool, state *TableState, connState *ConnectionState) {
+func drawTable(s tcell.Screen, sorted *SortedDevices, paused bool, state *TableState, connState *ConnectionState, locState *LocationState) {
 	s.Clear()
 	width, height := s.Size()
 
 	// Calculate column widths using constants
-	// Order: Last Seen, MAC, Signal, RSSI, Name, Service UUIDs, Mfr ID, Mfr Data (variable)
+	// Order: Last Seen, MAC, Signal, RSSI, Location, Name, Service UUIDs, Mfr ID, Mfr Data (variable)
 	colWidths := []int{
 		colWidthLastSeen,
 		colWidthMAC,
 		colWidthSignal,
 		colWidthRSSI,
+		colWidthLocation,
 		colWidthName,
 		colWidthServiceUUIDs,
 		colWidthMfrCode,
-		width - colWidthLastSeen - colWidthMAC - colWidthSignal - colWidthRSSI - colWidthName - colWidthServiceUUIDs - colWidthMfrCode,
+		width - colWidthLastSeen - colWidthMAC - colWidthSignal - colWidthRSSI - colWidthLocation - colWidthName - colWidthServiceUUIDs - colWidthMfrCode,
 	}
 
 	// Use pre-separated recent and stale devices from GetSorted()
@@ -76,6 +78,26 @@ func drawTable(s tcell.Screen, sorted *SortedDevices, paused bool, state *TableS
 		}
 	}
 
+	// Add GPS status
+	gpsStatus, fixQuality, satellites, satellitesInView, _ := locState.GetStatus()
+	switch gpsStatus {
+	case "detecting":
+		statusText += " | GPS: Detecting..."
+	case "failed":
+		statusText += " | GPS: FAILED"
+	case "no_fix":
+		// Always show satellite counts
+		statusText += fmt.Sprintf(" | GPS: No Fix (%d / %d)", satellitesInView, satellites)
+	case "fix":
+		if currentLoc := locState.GetCurrent(); currentLoc != nil {
+			statusText += fmt.Sprintf(" | GPS: Fix (%.4f, %.4f) Q:%d %d / %d",
+				currentLoc.Latitude, currentLoc.Longitude, fixQuality, satellitesInView, satellites)
+		} else {
+			statusText += fmt.Sprintf(" | GPS: Fix Q:%d %d / %d", fixQuality, satellitesInView, satellites)
+		}
+		// "no_gps" status - don't show anything
+	}
+
 	// Add focus indicator and scroll position
 	if state.focusedTable == "near" {
 		statusText += fmt.Sprintf(" | Focus: RECENT (row %d-%d of %d)",
@@ -104,6 +126,16 @@ func drawTable(s tcell.Screen, sorted *SortedDevices, paused bool, state *TableS
 		drawDisconnectionModal(s, connState)
 	}
 
+	// Draw GPS failure modal if GPS detection failed and not dismissed
+	if locState.ShouldShowGPSFailureModal() {
+		drawGPSFailureModal(s)
+	}
+
+	// Draw GPS reconnection modal if GPS is reconnecting and not dismissed
+	if locState.ShouldShowGPSReconnectModal() {
+		drawGPSReconnectionModal(s, locState)
+	}
+
 	s.Show()
 }
 
@@ -128,7 +160,7 @@ func drawDeviceTable(s tcell.Screen, devices []*BLEDevice, colWidths []int, titl
 
 	// Draw header
 	headerStyle := tcell.StyleDefault.Bold(true).Background(tcell.ColorNavy).Foreground(tcell.ColorWhite)
-	headers := []string{"Last Seen", "MAC Address", "Sig", "RSSI", "Device Name", "Service UUIDs", "Mfr ID", "Mfr Data"}
+	headers := []string{"Last Seen", "MAC Address", "Sig", "RSSI", "Location", "Device Name", "Service UUIDs", "Mfr ID", "Mfr Data"}
 
 	col := 0
 	for i, header := range headers {
@@ -182,13 +214,23 @@ func drawDeviceTable(s tcell.Screen, devices []*BLEDevice, colWidths []int, titl
 		// Draw RSSI
 		drawText(s, colWidths[0]+colWidths[1]+colWidths[2], row, colWidths[3], normalStyle, fmt.Sprintf("%d", dev.RSSI))
 
+		// Draw Location (averaged from highest RSSI's geo data)
+		locationStr := ""
+		if dev.GeoData != nil {
+			if loc := dev.GeoData.GetLocation(); loc != nil {
+				// Format: "lat, lon" with 5 decimal places (≈1.1m precision)
+				locationStr = fmt.Sprintf("%.5f, %.5f", loc.Latitude, loc.Longitude)
+			}
+		}
+		drawText(s, colWidths[0]+colWidths[1]+colWidths[2]+colWidths[3], row, colWidths[4], normalStyle, locationStr)
+
 		// Draw device name
-		drawText(s, colWidths[0]+colWidths[1]+colWidths[2]+colWidths[3], row, colWidths[4], normalStyle, dev.DeviceName)
+		drawText(s, colWidths[0]+colWidths[1]+colWidths[2]+colWidths[3]+colWidths[4], row, colWidths[5], normalStyle, dev.DeviceName)
 
 		// Draw service UUIDs (multi-line with ellipsis support) - now fixed width at 38 chars
-		uuidCol := colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3] + colWidths[4]
+		uuidCol := colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3] + colWidths[4] + colWidths[5]
 		if len(dev.ServiceUUIDs) == 0 {
-			drawText(s, uuidCol, row, colWidths[5], normalStyle, "")
+			drawText(s, uuidCol, row, colWidths[6], normalStyle, "")
 		} else {
 			for j, uuid := range dev.ServiceUUIDs {
 				if row+j >= maxRow {
@@ -196,10 +238,10 @@ func drawDeviceTable(s tcell.Screen, devices []*BLEDevice, colWidths []int, titl
 				}
 				// Ellipsize if UUID is longer than column width
 				displayUUID := uuid
-				if len(uuid) > colWidths[5] && colWidths[5] > 3 {
-					displayUUID = uuid[:colWidths[5]-3] + "..."
+				if len(uuid) > colWidths[6] && colWidths[6] > 3 {
+					displayUUID = uuid[:colWidths[6]-3] + "..."
 				}
-				drawText(s, uuidCol, row+j, colWidths[5], normalStyle, displayUUID)
+				drawText(s, uuidCol, row+j, colWidths[6], normalStyle, displayUUID)
 			}
 		}
 
@@ -208,11 +250,11 @@ func drawDeviceTable(s tcell.Screen, devices []*BLEDevice, colWidths []int, titl
 		if dev.MfrCode != 0 {
 			mfrCodeStr = fmt.Sprintf("%d", dev.MfrCode)
 		}
-		drawText(s, colWidths[0]+colWidths[1]+colWidths[2]+colWidths[3]+colWidths[4]+colWidths[5], row, colWidths[6], normalStyle, mfrCodeStr)
+		drawText(s, colWidths[0]+colWidths[1]+colWidths[2]+colWidths[3]+colWidths[4]+colWidths[5]+colWidths[6], row, colWidths[7], normalStyle, mfrCodeStr)
 
 		// Draw Mfr Data (variable width - fills remaining space)
-		mfrDataCol := colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3] + colWidths[4] + colWidths[5] + colWidths[6]
-		drawText(s, mfrDataCol, row, colWidths[7], normalStyle, dev.MfrData)
+		mfrDataCol := colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3] + colWidths[4] + colWidths[5] + colWidths[6] + colWidths[7]
+		drawText(s, mfrDataCol, row, colWidths[8], normalStyle, dev.MfrData)
 
 		row += uuidLines
 	}
@@ -398,4 +440,122 @@ func drawCenteredText(s tcell.Screen, x, y, width int, style tcell.Style, text s
 			s.SetContent(textX+i, y, ch, nil, style)
 		}
 	}
+}
+
+// drawGPSFailureModal draws a yellow-background modal when GPS auto-detection fails
+func drawGPSFailureModal(s tcell.Screen) {
+	width, height := s.Size()
+
+	// Modal dimensions
+	modalWidth := 60
+	modalHeight := 7
+	modalX := (width - modalWidth) / 2
+	modalY := (height - modalHeight) / 2
+
+	// Styles
+	borderStyle := tcell.StyleDefault.Foreground(tcell.ColorBlack).Background(tcell.ColorYellow).Bold(true)
+	bgStyle := tcell.StyleDefault.Foreground(tcell.ColorBlack).Background(tcell.ColorYellow)
+	textStyle := tcell.StyleDefault.Foreground(tcell.ColorBlack).Background(tcell.ColorYellow)
+
+	// Draw modal background
+	for y := modalY; y < modalY+modalHeight; y++ {
+		for x := modalX; x < modalX+modalWidth; x++ {
+			s.SetContent(x, y, ' ', nil, bgStyle)
+		}
+	}
+
+	// Draw border
+	// Top and bottom borders
+	for x := modalX; x < modalX+modalWidth; x++ {
+		s.SetContent(x, modalY, '═', nil, borderStyle)
+		s.SetContent(x, modalY+modalHeight-1, '═', nil, borderStyle)
+	}
+	// Side borders
+	for y := modalY; y < modalY+modalHeight; y++ {
+		s.SetContent(modalX, y, '║', nil, borderStyle)
+		s.SetContent(modalX+modalWidth-1, y, '║', nil, borderStyle)
+	}
+	// Corners
+	s.SetContent(modalX, modalY, '╔', nil, borderStyle)
+	s.SetContent(modalX+modalWidth-1, modalY, '╗', nil, borderStyle)
+	s.SetContent(modalX, modalY+modalHeight-1, '╚', nil, borderStyle)
+	s.SetContent(modalX+modalWidth-1, modalY+modalHeight-1, '╝', nil, borderStyle)
+
+	// Draw title
+	title := " GPS AUTO-DETECTION FAILED "
+	titleX := modalX + (modalWidth-len(title))/2
+	for i, ch := range title {
+		s.SetContent(titleX+i, modalY+1, ch, nil, borderStyle)
+	}
+
+	// Draw message
+	line1 := "Could not detect GPS device baud rate."
+	line2 := "Operating without GPS data."
+	line3 := "Press any key to dismiss."
+
+	drawCenteredText(s, modalX, modalY+3, modalWidth, textStyle, line1)
+	drawCenteredText(s, modalX, modalY+4, modalWidth, textStyle, line2)
+	drawCenteredText(s, modalX, modalY+5, modalWidth, textStyle, line3)
+}
+
+// drawGPSReconnectionModal draws an orange-background modal when GPS is reconnecting
+func drawGPSReconnectionModal(s tcell.Screen, locState *LocationState) {
+	width, height := s.Size()
+
+	// Modal dimensions
+	modalWidth := 60
+	modalHeight := 8
+	modalX := (width - modalWidth) / 2
+	modalY := (height - modalHeight) / 2
+
+	// Get reconnection info
+	attempts, elapsed := locState.GetGPSReconnectInfo()
+	elapsed = elapsed.Round(time.Second)
+
+	// Styles
+	borderStyle := tcell.StyleDefault.Foreground(tcell.ColorBlack).Background(tcell.ColorOrange).Bold(true)
+	bgStyle := tcell.StyleDefault.Foreground(tcell.ColorBlack).Background(tcell.ColorOrange)
+	textStyle := tcell.StyleDefault.Foreground(tcell.ColorBlack).Background(tcell.ColorOrange)
+
+	// Draw modal background
+	for y := modalY; y < modalY+modalHeight; y++ {
+		for x := modalX; x < modalX+modalWidth; x++ {
+			s.SetContent(x, y, ' ', nil, bgStyle)
+		}
+	}
+
+	// Draw border
+	// Top and bottom borders
+	for x := modalX; x < modalX+modalWidth; x++ {
+		s.SetContent(x, modalY, '═', nil, borderStyle)
+		s.SetContent(x, modalY+modalHeight-1, '═', nil, borderStyle)
+	}
+	// Side borders
+	for y := modalY; y < modalY+modalHeight; y++ {
+		s.SetContent(modalX, y, '║', nil, borderStyle)
+		s.SetContent(modalX+modalWidth-1, y, '║', nil, borderStyle)
+	}
+	// Corners
+	s.SetContent(modalX, modalY, '╔', nil, borderStyle)
+	s.SetContent(modalX+modalWidth-1, modalY, '╗', nil, borderStyle)
+	s.SetContent(modalX, modalY+modalHeight-1, '╚', nil, borderStyle)
+	s.SetContent(modalX+modalWidth-1, modalY+modalHeight-1, '╝', nil, borderStyle)
+
+	// Draw title
+	title := " GPS CONNECTION LOST "
+	titleX := modalX + (modalWidth-len(title))/2
+	for i, ch := range title {
+		s.SetContent(titleX+i, modalY+1, ch, nil, borderStyle)
+	}
+
+	// Draw status text
+	line1 := "GPS connection interrupted!"
+	line2 := fmt.Sprintf("Reconnection attempt: %d", attempts)
+	line3 := fmt.Sprintf("Time since disconnect: %v", elapsed)
+	line4 := "Press any key to dismiss."
+
+	drawCenteredText(s, modalX, modalY+3, modalWidth, textStyle, line1)
+	drawCenteredText(s, modalX, modalY+4, modalWidth, textStyle, line2)
+	drawCenteredText(s, modalX, modalY+5, modalWidth, textStyle, line3)
+	drawCenteredText(s, modalX, modalY+6, modalWidth, textStyle, line4)
 }

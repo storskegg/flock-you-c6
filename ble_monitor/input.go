@@ -9,7 +9,21 @@ import (
 )
 
 // handleKeyboardEvent processes keyboard input
-func handleKeyboardEvent(ev *tcell.EventKey, agg *Aggregator, paused *bool, pauseMu *sync.RWMutex, tableState *TableState, connState *ConnectionState, s tcell.Screen) bool {
+func handleKeyboardEvent(ev *tcell.EventKey, agg *Aggregator, paused *bool, pauseMu *sync.RWMutex, tableState *TableState, connState *ConnectionState, locState *LocationState, s tcell.Screen) bool {
+	// If GPS failure modal is showing, any key dismisses it
+	if locState.ShouldShowGPSFailureModal() {
+		locState.DismissGPSFailure()
+		drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState)
+		return false
+	}
+
+	// If GPS reconnection modal is showing, any key dismisses it
+	if locState.ShouldShowGPSReconnectModal() {
+		locState.DismissGPSReconnect()
+		drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState)
+		return false
+	}
+
 	switch ev.Key() {
 	case tcell.KeyRune:
 		switch ev.Rune() {
@@ -18,37 +32,37 @@ func handleKeyboardEvent(ev *tcell.EventKey, agg *Aggregator, paused *bool, paus
 		case 'e', 'E':
 			handleExport(agg)
 		case 'c', 'C':
-			handleClear(agg, tableState, paused, s, connState)
+			handleClear(agg, tableState, paused, s, connState, locState)
 		case 'p', 'P':
 			handlePause(paused, pauseMu)
 		case 'j', 'J': // Scroll down (vim-style)
 			handleScrollDown(tableState)
-			drawTable(s, agg.GetSorted(), *paused, tableState, connState)
+			drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState)
 		case 'k', 'K': // Scroll up (vim-style)
 			handleScrollUp(tableState)
-			drawTable(s, agg.GetSorted(), *paused, tableState, connState)
+			drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState)
 		}
 	case tcell.KeyUp:
 		handleScrollUp(tableState)
-		drawTable(s, agg.GetSorted(), *paused, tableState, connState)
+		drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState)
 	case tcell.KeyDown:
 		handleScrollDown(tableState)
-		drawTable(s, agg.GetSorted(), *paused, tableState, connState)
+		drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState)
 	case tcell.KeyPgUp:
 		handlePageUp(tableState)
-		drawTable(s, agg.GetSorted(), *paused, tableState, connState)
+		drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState)
 	case tcell.KeyPgDn:
 		handlePageDown(tableState)
-		drawTable(s, agg.GetSorted(), *paused, tableState, connState)
+		drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState)
 	case tcell.KeyHome:
 		handleHome(tableState)
-		drawTable(s, agg.GetSorted(), *paused, tableState, connState)
+		drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState)
 	case tcell.KeyEnd:
 		handleEnd(tableState, agg)
-		drawTable(s, agg.GetSorted(), *paused, tableState, connState)
+		drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState)
 	case tcell.KeyTab:
 		handleTabSwitch(tableState)
-		drawTable(s, agg.GetSorted(), *paused, tableState, connState)
+		drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState)
 	case tcell.KeyCtrlC:
 		return true // Signal quit
 	}
@@ -64,11 +78,11 @@ func handleExport(agg *Aggregator) {
 }
 
 // handleClear clears the aggregator and resets scroll positions
-func handleClear(agg *Aggregator, tableState *TableState, paused *bool, s tcell.Screen, connState *ConnectionState) {
+func handleClear(agg *Aggregator, tableState *TableState, paused *bool, s tcell.Screen, connState *ConnectionState, locState *LocationState) {
 	agg.Clear()
 	tableState.nearScrollOffset = 0
 	tableState.farScrollOffset = 0
-	drawTable(s, agg.GetSorted(), *paused, tableState, connState)
+	drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState)
 }
 
 // handlePause toggles pause state
@@ -155,7 +169,7 @@ func handleTabSwitch(tableState *TableState) {
 }
 
 // handleMouseEvent processes mouse input
-func handleMouseEvent(ev *tcell.EventMouse, tableState *TableState, agg *Aggregator, paused bool, s tcell.Screen, connState *ConnectionState) {
+func handleMouseEvent(ev *tcell.EventMouse, tableState *TableState, agg *Aggregator, paused bool, s tcell.Screen, connState *ConnectionState, locState *LocationState) {
 	_, y := ev.Position()
 	buttons := ev.Buttons()
 
@@ -176,7 +190,7 @@ func handleMouseEvent(ev *tcell.EventMouse, tableState *TableState, agg *Aggrega
 				tableState.farScrollOffset = 0
 			}
 		}
-		drawTable(s, agg.GetSorted(), paused, tableState, connState)
+		drawTable(s, agg.GetSorted(), paused, tableState, connState, locState)
 	} else if buttons&tcell.WheelDown != 0 {
 		// Scroll down
 		if y < midPoint && tableState.focusedTable == "near" {
@@ -184,15 +198,15 @@ func handleMouseEvent(ev *tcell.EventMouse, tableState *TableState, agg *Aggrega
 		} else if y >= midPoint && tableState.focusedTable == "far" {
 			tableState.farScrollOffset++
 		}
-		drawTable(s, agg.GetSorted(), paused, tableState, connState)
+		drawTable(s, agg.GetSorted(), paused, tableState, connState, locState)
 	}
 }
 
 // handleResizeEvent processes terminal resize events
-func handleResizeEvent(s tcell.Screen, agg *Aggregator, paused *bool, pauseMu *sync.RWMutex, tableState *TableState, connState *ConnectionState) {
+func handleResizeEvent(s tcell.Screen, agg *Aggregator, paused *bool, pauseMu *sync.RWMutex, tableState *TableState, connState *ConnectionState, locState *LocationState) {
 	s.Sync()
 	pauseMu.RLock()
 	isPaused := *paused
 	pauseMu.RUnlock()
-	drawTable(s, agg.GetSorted(), isPaused, tableState, connState)
+	drawTable(s, agg.GetSorted(), isPaused, tableState, connState, locState)
 }

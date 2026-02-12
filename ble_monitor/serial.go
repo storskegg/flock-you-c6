@@ -68,7 +68,7 @@ func openSerialPort(portPath string, baudRate int) (io.ReadCloser, error) {
 
 // readSerial reads from reader and processes lines, with automatic reconnection for serial ports
 // Reconnection attempts continue indefinitely with exponential backoff until success or app quit
-func readSerial(portPath string, baudRate int, agg *Aggregator, paused *bool, pauseMu *sync.RWMutex, connState *ConnectionState, done <-chan struct{}) {
+func readSerial(portPath string, baudRate int, agg *Aggregator, paused *bool, pauseMu *sync.RWMutex, connState *ConnectionState, locState *LocationState, done <-chan struct{}) {
 	var reader io.ReadCloser
 	var err error
 
@@ -76,7 +76,7 @@ func readSerial(portPath string, baudRate int, agg *Aggregator, paused *bool, pa
 	if portPath == "" {
 		reader = os.Stdin
 		connState.SetConnected(true)
-		readSerialLoop(reader, agg, paused, pauseMu, connState, done)
+		readSerialLoop(reader, agg, paused, pauseMu, connState, locState, done)
 		return
 	}
 
@@ -135,7 +135,7 @@ func readSerial(portPath string, baudRate int, agg *Aggregator, paused *bool, pa
 		playConnectedSound()
 
 		// Read from the port until error or done
-		err = readSerialLoop(reader, agg, paused, pauseMu, connState, done)
+		err = readSerialLoop(reader, agg, paused, pauseMu, connState, locState, done)
 
 		// Close the port
 		reader.Close()
@@ -163,7 +163,7 @@ func readSerial(portPath string, baudRate int, agg *Aggregator, paused *bool, pa
 }
 
 // readSerialLoop performs the actual reading and processing
-func readSerialLoop(reader io.ReadCloser, agg *Aggregator, paused *bool, pauseMu *sync.RWMutex, connState *ConnectionState, done <-chan struct{}) error {
+func readSerialLoop(reader io.ReadCloser, agg *Aggregator, paused *bool, pauseMu *sync.RWMutex, connState *ConnectionState, locState *LocationState, done <-chan struct{}) error {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024) // Increase buffer for large lines
 
@@ -176,7 +176,7 @@ func readSerialLoop(reader io.ReadCloser, agg *Aggregator, paused *bool, pauseMu
 				// Use Bytes() instead of Text() to avoid allocation
 				line := scanner.Bytes()
 				// Process immediately in this goroutine for minimal latency
-				processSerialLine(line, agg, paused, pauseMu)
+				processSerialLine(line, agg, paused, pauseMu, locState)
 			} else {
 				if err := scanner.Err(); err != nil {
 					// Scanner error (likely connection issue)
@@ -190,7 +190,7 @@ func readSerialLoop(reader io.ReadCloser, agg *Aggregator, paused *bool, pauseMu
 }
 
 // processSerialLine processes a single line of JSON
-func processSerialLine(line []byte, agg *Aggregator, paused *bool, pauseMu *sync.RWMutex) {
+func processSerialLine(line []byte, agg *Aggregator, paused *bool, pauseMu *sync.RWMutex, locState *LocationState) {
 	// Check if paused
 	pauseMu.RLock()
 	isPaused := *paused
@@ -222,7 +222,20 @@ func processSerialLine(line []byte, agg *Aggregator, paused *bool, pauseMu *sync
 			MfrData:      msg.MfrData,
 			ServiceUUIDs: msg.ServiceUUIDs,
 			LastSeen:     time.Now().UTC(),
+			GeoData:      NewRSSILocationMap(),
 		}
+
+		// Add or update the device in the aggregator
 		agg.AddOrUpdate(device)
+
+		// Now push current GPS location to the stored device (after it's been added/updated)
+		if currentLoc := locState.GetCurrent(); currentLoc != nil {
+			// Get the device from aggregator to push location to the actual stored instance
+			agg.mu.Lock()
+			if storedDev, exists := agg.devices[msg.MacAddress]; exists && storedDev.GeoData != nil {
+				storedDev.GeoData.Push(msg.RSSI, *currentLoc)
+			}
+			agg.mu.Unlock()
+		}
 	}
 }

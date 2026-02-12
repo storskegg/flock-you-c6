@@ -17,6 +17,7 @@ func main() {
 	serialPort := flag.String("port", "", "Serial port device (e.g., /dev/ttyUSB0). If not specified, reads from stdin.")
 	baudRate := flag.Int("baud", 115200, "Baud rate for serial port (default: 115200)")
 	refreshRate := flag.Int("refresh", 4, "TUI refresh rate in updates per second (default: 4)")
+	gpsPort := flag.String("gps", "", "GPS/GNSS serial port device (e.g., /dev/ttyUSB1). If not specified, no GPS data collected.")
 	flag.Parse()
 
 	// Calculate refresh interval from refresh rate
@@ -37,8 +38,16 @@ func main() {
 		connected: false,
 	}
 
+	// Initialize location state
+	locState := NewLocationState()
+
+	// Start GPS reading if -gps flag is provided
+	if *gpsPort != "" {
+		go readGPS(*gpsPort, locState, done)
+	}
+
 	// Start reading from input source (handles reconnection internally)
-	go readSerial(*serialPort, *baudRate, agg, &paused, &pauseMu, connState, done)
+	go readSerial(*serialPort, *baudRate, agg, &paused, &pauseMu, connState, locState, done)
 
 	// Initialize screen
 	s, err := tcell.NewScreen()
@@ -71,7 +80,7 @@ func main() {
 	defer ticker.Stop()
 
 	// Initial draw
-	drawTable(s, agg.GetSorted(), paused, tableState, connState)
+	drawTable(s, agg.GetSorted(), paused, tableState, connState, locState)
 
 	// Event loop
 	quit := false
@@ -81,7 +90,7 @@ func main() {
 			pauseMu.RLock()
 			isPaused := paused
 			pauseMu.RUnlock()
-			drawTable(s, agg.GetSorted(), isPaused, tableState, connState)
+			drawTable(s, agg.GetSorted(), isPaused, tableState, connState, locState)
 
 		case <-sigChan:
 			quit = true
@@ -92,13 +101,13 @@ func main() {
 				ev := s.PollEvent()
 				switch ev := ev.(type) {
 				case *tcell.EventKey:
-					if handleKeyboardEvent(ev, agg, &paused, &pauseMu, tableState, connState, s) {
+					if handleKeyboardEvent(ev, agg, &paused, &pauseMu, tableState, connState, locState, s) {
 						quit = true
 					}
 				case *tcell.EventMouse:
-					handleMouseEvent(ev, tableState, agg, paused, s, connState)
+					handleMouseEvent(ev, tableState, agg, paused, s, connState, locState)
 				case *tcell.EventResize:
-					handleResizeEvent(s, agg, &paused, &pauseMu, tableState, connState)
+					handleResizeEvent(s, agg, &paused, &pauseMu, tableState, connState, locState)
 				}
 			}
 			time.Sleep(10 * time.Millisecond)

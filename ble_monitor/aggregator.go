@@ -39,6 +39,7 @@ type BLEDevice struct {
 	MfrData      string
 	ServiceUUIDs []string
 	LastSeen     time.Time
+	GeoData      *RSSILocationMap // Geographic data keyed by top 3 RSSIs
 }
 
 // Aggregator stores BLE devices indexed by MAC address
@@ -93,6 +94,11 @@ func (a *Aggregator) AddOrUpdate(device *BLEDevice) {
 	// Update ServiceUUIDs
 	if len(existing.ServiceUUIDs) == 0 || len(device.ServiceUUIDs) > 0 {
 		existing.ServiceUUIDs = device.ServiceUUIDs
+	}
+
+	// Ensure GeoData exists (initialize if needed)
+	if existing.GeoData == nil {
+		existing.GeoData = NewRSSILocationMap()
 	}
 }
 
