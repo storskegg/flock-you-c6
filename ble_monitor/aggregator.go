@@ -39,7 +39,8 @@ type BLEDevice struct {
 	MfrData      string
 	ServiceUUIDs []string
 	LastSeen     time.Time
-	GeoData      *RSSILocationMap // Geographic data keyed by top 3 RSSIs
+	Count        int              // Number of times device has been observed
+	GeoData      *RSSILocationMap // Geographic data keyed by all RSSIs
 }
 
 // Aggregator stores BLE devices indexed by MAC address
@@ -60,12 +61,16 @@ func (a *Aggregator) AddOrUpdate(device *BLEDevice) {
 
 	existing, exists := a.devices[device.MacAddress]
 	if !exists {
-		// New device, just add it
+		// New device, initialize count to 1
+		device.Count = 1
 		a.devices[device.MacAddress] = device
 		return
 	}
 
-	// Device exists, apply update rules for each field:
+	// Device exists - increment observation count
+	existing.Count++
+
+	// Apply update rules for each field:
 	// - If existing field is empty, update it
 	// - If existing field is not empty and new field is not empty, update it
 	// - If existing field is not empty and new field is empty, keep existing

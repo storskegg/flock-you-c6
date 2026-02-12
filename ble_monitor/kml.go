@@ -21,6 +21,11 @@ func buildDeviceDescription(dev *BLEDevice) string {
 	html.WriteString(dev.LastSeen.Format("2006-01-02 15:04:05"))
 	html.WriteString("</li>")
 
+	// Count
+	html.WriteString("<li><strong>Count:</strong> ")
+	html.WriteString(fmt.Sprintf("%d", dev.Count))
+	html.WriteString("</li>")
+
 	// MAC Address
 	html.WriteString("<li><strong>MAC Address:</strong> ")
 	html.WriteString(dev.MacAddress)
@@ -481,6 +486,303 @@ func (a *Aggregator) ExportKML(filename string) error {
 	}
 
 	return nil
+}
+
+// mergeKMLAndExit merges multiple KML files and writes the result
+// Called from main when -merge-kml flag is used
+func mergeKMLAndExit(filesArg string) error {
+	// Parse comma-separated file paths
+	filePaths := strings.Split(filesArg, ",")
+	if len(filePaths) == 0 {
+		return fmt.Errorf("no files specified")
+	}
+
+	// Trim whitespace from paths
+	for i := range filePaths {
+		filePaths[i] = strings.TrimSpace(filePaths[i])
+	}
+
+	fmt.Printf("Merging %d KML files...\n", len(filePaths))
+
+	// Collect all placemarks by folder type
+	var allPoints []string
+	var allPaths []string
+	var allPolygons []string
+	var allSessionPoints []GeoLocation
+
+	successCount := 0
+
+	// Process each file
+	for _, filePath := range filePaths {
+		fmt.Printf("Reading: %s\n", filePath)
+
+		points, paths, polygons, sessionPoints, err := extractPlacemarksFromKML(filePath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "WARNING: Failed to parse %s: %v (skipping)\n", filePath, err)
+			continue
+		}
+
+		allPoints = append(allPoints, points...)
+		allPaths = append(allPaths, paths...)
+		allPolygons = append(allPolygons, polygons...)
+		allSessionPoints = append(allSessionPoints, sessionPoints...)
+
+		successCount++
+		fmt.Printf("  ✓ Loaded %d points, %d paths, %d polygons\n", len(points), len(paths), len(polygons))
+	}
+
+	if successCount == 0 {
+		return fmt.Errorf("no files successfully parsed")
+	}
+
+	fmt.Printf("\nSuccessfully merged %d/%d files\n", successCount, len(filePaths))
+	fmt.Printf("Total: %d points, %d paths, %d polygons, %d location data points\n",
+		len(allPoints), len(allPaths), len(allPolygons), len(allSessionPoints))
+
+	// Find non-colliding filename
+	outputPath := findNonCollidingFilename("ble_devices-MERGE", ".kml")
+	fmt.Printf("\nWriting merged KML to: %s\n", outputPath)
+
+	// Write merged KML
+	if err := writeMergedKML(outputPath, allPoints, allPaths, allPolygons, allSessionPoints); err != nil {
+		return fmt.Errorf("failed to write merged KML: %w", err)
+	}
+
+	fmt.Printf("✓ Merge complete!\n")
+	return nil
+}
+
+// extractPlacemarksFromKML parses a KML file and extracts Placemark XML by folder
+func extractPlacemarksFromKML(filePath string) ([]string, []string, []string, []GeoLocation, error) {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("failed to read file: %w", err)
+	}
+
+	text := string(content)
+
+	// Extract placemarks from each folder by name
+	points := extractPlacemarksFromFolder(text, "Points")
+	paths := extractPlacemarksFromFolder(text, "Paths")
+	polygons := extractPlacemarksFromFolder(text, "Polygons")
+
+	// Extract all coordinates for session boundary
+	sessionPoints := extractAllCoordinates(text)
+
+	return points, paths, polygons, sessionPoints, nil
+}
+
+// extractPlacemarksFromFolder extracts all Placemark elements from a named folder
+func extractPlacemarksFromFolder(kmlText, folderName string) []string {
+	var placemarks []string
+
+	// Find the folder by name
+	folderNameTag := fmt.Sprintf("<name>%s</name>", folderName)
+	folderIdx := strings.Index(kmlText, folderNameTag)
+	if folderIdx == -1 {
+		return placemarks // Folder not found
+	}
+
+	// Find the <Folder> tag before the name
+	folderStart := strings.LastIndex(kmlText[:folderIdx], "<Folder>")
+	if folderStart == -1 {
+		return placemarks
+	}
+
+	// Find the closing </Folder> tag
+	folderEnd := strings.Index(kmlText[folderStart:], "</Folder>")
+	if folderEnd == -1 {
+		return placemarks
+	}
+	folderEnd += folderStart
+
+	folderContent := kmlText[folderStart:folderEnd]
+
+	// Extract all <Placemark>...</Placemark> within this folder
+	searchStart := 0
+	for {
+		placemarkStart := strings.Index(folderContent[searchStart:], "<Placemark>")
+		if placemarkStart == -1 {
+			break
+		}
+		placemarkStart += searchStart
+
+		placemarkEnd := strings.Index(folderContent[placemarkStart:], "</Placemark>")
+		if placemarkEnd == -1 {
+			break
+		}
+		placemarkEnd += placemarkStart + len("</Placemark>")
+
+		placemark := folderContent[placemarkStart:placemarkEnd]
+		placemarks = append(placemarks, placemark)
+
+		searchStart = placemarkEnd
+	}
+
+	return placemarks
+}
+
+// extractAllCoordinates extracts all coordinate data from KML text
+func extractAllCoordinates(kmlText string) []GeoLocation {
+	var locations []GeoLocation
+
+	coordsStart := "<coordinates>"
+	coordsEnd := "</coordinates>"
+
+	searchStart := 0
+	for {
+		start := strings.Index(kmlText[searchStart:], coordsStart)
+		if start == -1 {
+			break
+		}
+		start += searchStart + len(coordsStart)
+
+		end := strings.Index(kmlText[start:], coordsEnd)
+		if end == -1 {
+			break
+		}
+		end += start
+
+		coordsText := strings.TrimSpace(kmlText[start:end])
+
+		// Parse coordinate tuples (space-separated)
+		tuples := strings.Fields(coordsText)
+		for _, tuple := range tuples {
+			parts := strings.Split(tuple, ",")
+			if len(parts) >= 2 {
+				var lon, lat, alt float64
+				fmt.Sscanf(parts[0], "%f", &lon)
+				fmt.Sscanf(parts[1], "%f", &lat)
+				if len(parts) >= 3 {
+					fmt.Sscanf(parts[2], "%f", &alt)
+				}
+
+				locations = append(locations, GeoLocation{
+					Latitude:  lat,
+					Longitude: lon,
+					Elevation: alt,
+				})
+			}
+		}
+
+		searchStart = end + len(coordsEnd)
+	}
+
+	return locations
+}
+
+// writeMergedKML writes merged placemarks to a new KML file
+func writeMergedKML(outputPath string, points, paths, polygons []string, sessionPoints []GeoLocation) error {
+	file, err := os.Create(outputPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	// Write KML header
+	file.WriteString(`<?xml version="1.0" encoding="UTF-8"?>`)
+	file.WriteString("\n")
+	file.WriteString(`<kml xmlns="http://www.opengis.net/kml/2.2">`)
+	file.WriteString("\n  <Document>\n")
+	file.WriteString(fmt.Sprintf("    <name>BLE Devices - MERGED - %s</name>\n", time.Now().Format("2006-01-02 15:04:05")))
+
+	// Write Points folder
+	if len(points) > 0 {
+		file.WriteString("    <Folder>\n")
+		file.WriteString("      <name>Points</name>\n")
+		for _, placemark := range points {
+			// Indent the placemark
+			indented := strings.ReplaceAll(placemark, "\n", "\n      ")
+			file.WriteString("      " + indented + "\n")
+		}
+		file.WriteString("    </Folder>\n")
+	}
+
+	// Write Paths folder
+	if len(paths) > 0 {
+		file.WriteString("    <Folder>\n")
+		file.WriteString("      <name>Paths</name>\n")
+		for _, placemark := range paths {
+			indented := strings.ReplaceAll(placemark, "\n", "\n      ")
+			file.WriteString("      " + indented + "\n")
+		}
+		file.WriteString("    </Folder>\n")
+	}
+
+	// Write Polygons folder
+	if len(polygons) > 0 {
+		file.WriteString("    <Folder>\n")
+		file.WriteString("      <name>Polygons</name>\n")
+		for _, placemark := range polygons {
+			indented := strings.ReplaceAll(placemark, "\n", "\n      ")
+			file.WriteString("      " + indented + "\n")
+		}
+		file.WriteString("    </Folder>\n")
+	}
+
+	// Write Session Boundary folder (recompute from all coordinates)
+	if len(sessionPoints) > 0 {
+		file.WriteString("    <Folder>\n")
+		file.WriteString("      <name>Session Boundary</name>\n")
+
+		// Create session boundary placemark
+		hull := computeConvexHull(sessionPoints)
+		if len(hull) >= 3 {
+			coords := make([]string, len(hull)+1)
+			for i, loc := range hull {
+				coords[i] = fmt.Sprintf("%.5f,%.5f,%.1f", loc.Longitude, loc.Latitude, loc.Elevation)
+			}
+			coords[len(hull)] = coords[0] // Close polygon
+
+			description := fmt.Sprintf(
+				"&lt;ul&gt;&lt;li&gt;&lt;strong&gt;Total Points:&lt;/strong&gt; %d&lt;/li&gt;&lt;li&gt;&lt;strong&gt;Boundary Points:&lt;/strong&gt; %d&lt;/li&gt;&lt;li&gt;&lt;strong&gt;Merge Time:&lt;/strong&gt; %s&lt;/li&gt;&lt;/ul&gt;",
+				len(sessionPoints),
+				len(hull),
+				time.Now().Format("2006-01-02 15:04:05"),
+			)
+
+			file.WriteString("      <Placemark>\n")
+			file.WriteString("        <name>Session Area</name>\n")
+			file.WriteString(fmt.Sprintf("        <description>%s</description>\n", description))
+			file.WriteString("        <Polygon>\n")
+			file.WriteString("          <outerBoundaryIs>\n")
+			file.WriteString("            <LinearRing>\n")
+			file.WriteString(fmt.Sprintf("              <coordinates>%s</coordinates>\n", strings.Join(coords, " ")))
+			file.WriteString("            </LinearRing>\n")
+			file.WriteString("          </outerBoundaryIs>\n")
+			file.WriteString("        </Polygon>\n")
+			file.WriteString("      </Placemark>\n")
+		}
+
+		file.WriteString("    </Folder>\n")
+	}
+
+	// Write KML footer
+	file.WriteString("  </Document>\n")
+	file.WriteString("</kml>\n")
+
+	return nil
+}
+
+// findNonCollidingFilename finds a filename that doesn't exist
+// Format: prefix-{i}.ext where i starts at 1 and increments until no collision
+func findNonCollidingFilename(prefix, ext string) string {
+	// Try without number first
+	path := prefix + ext
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return path
+	}
+
+	// Try with incrementing counter
+	for i := 1; i < 10000; i++ {
+		path = fmt.Sprintf("%s-%d%s", prefix, i, ext)
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			return path
+		}
+	}
+
+	// Fallback (should never happen)
+	return fmt.Sprintf("%s-%d%s", prefix, time.Now().Unix(), ext)
 }
 
 // createSessionBoundary creates a polygon representing the total session area

@@ -18,7 +18,17 @@ func main() {
 	baudRate := flag.Int("baud", 115200, "Baud rate for serial port (default: 115200)")
 	refreshRate := flag.Int("refresh", 4, "TUI refresh rate in updates per second (default: 4)")
 	gpsPort := flag.String("gps", "", "GPS/GNSS serial port device (e.g., /dev/ttyUSB1). If not specified, no GPS data collected.")
+	mergeKMLFiles := flag.String("merge-kml", "", "Merge KML files (comma-separated paths) and exit. Example: -merge-kml file1.kml,file2.kml,file3.kml")
 	flag.Parse()
+
+	// Handle merge-kml mode (merge and exit, no TUI)
+	if *mergeKMLFiles != "" {
+		if err := mergeKMLAndExit(*mergeKMLFiles); err != nil {
+			fmt.Fprintf(os.Stderr, "Error merging KML files: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 
 	// Calculate refresh interval from refresh rate
 	refreshInterval := time.Second / time.Duration(*refreshRate)

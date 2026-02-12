@@ -10,6 +10,7 @@ import (
 // Column width constants for TUI table
 const (
 	colWidthLastSeen     = 21 // "YYYY-MM-DD hh:mm:ss" + padding
+	colWidthCount        = 7  // Observation count
 	colWidthMAC          = 19
 	colWidthSignal       = 9 // Signal strength indicator
 	colWidthRSSI         = 6
@@ -72,6 +73,7 @@ func drawTable(s tcell.Screen, sorted *SortedDevices, paused bool, state *TableS
 	// Order: Last Seen, MAC, Signal, RSSI, Location, Name, Service UUIDs, Mfr ID, Mfr Data (variable)
 	colWidths := []int{
 		colWidthLastSeen,
+		colWidthCount,
 		colWidthMAC,
 		colWidthSignal,
 		colWidthRSSI,
@@ -79,7 +81,7 @@ func drawTable(s tcell.Screen, sorted *SortedDevices, paused bool, state *TableS
 		colWidthName,
 		colWidthServiceUUIDs,
 		colWidthMfrCode,
-		width - colWidthLastSeen - colWidthMAC - colWidthSignal - colWidthRSSI - colWidthLocation - colWidthName - colWidthServiceUUIDs - colWidthMfrCode,
+		width - colWidthLastSeen - colWidthCount - colWidthMAC - colWidthSignal - colWidthRSSI - colWidthLocation - colWidthName - colWidthServiceUUIDs - colWidthMfrCode,
 	}
 
 	// Use pre-separated recent and stale devices from GetSorted()
@@ -202,7 +204,7 @@ func drawDeviceTable(s tcell.Screen, devices []*BLEDevice, colWidths []int, titl
 
 	// Draw header
 	headerStyle := tcell.StyleDefault.Bold(true).Background(tcell.ColorNavy).Foreground(tcell.ColorWhite)
-	headers := []string{"Last Seen", "MAC Address", "Sig", "RSSI", "Location", "Device Name", "Service UUIDs", "Mfr ID", "Mfr Data"}
+	headers := []string{"Last Seen", "Count", "MAC Address", "Sig", "RSSI", "Location", "Device Name", "Service UUIDs", "Mfr ID", "Mfr Data"}
 
 	col := 0
 	for i, header := range headers {
@@ -243,18 +245,39 @@ func drawDeviceTable(s tcell.Screen, devices []*BLEDevice, colWidths []int, titl
 
 		// Draw Last Seen timestamp (first column)
 		lastSeenStr := dev.LastSeen.Format("2006-01-02 15:04:05")
-		drawText(s, 0, row, colWidths[0], normalStyle, lastSeenStr)
+
+		// For recent devices table, color Last Seen based on age
+		lastSeenStyle := normalStyle
+		if title == "RECENT DEVICES" {
+			age := time.Since(dev.LastSeen).Seconds()
+			if age > 8 {
+				// Bright red for > 8 seconds
+				lastSeenStyle = tcell.StyleDefault.Foreground(tcell.ColorRed).Background(tcell.ColorBlack)
+			} else if age > 6 {
+				// Orange for > 6 seconds
+				lastSeenStyle = tcell.StyleDefault.Foreground(tcell.ColorOrange).Background(tcell.ColorBlack)
+			} else if age > 4 {
+				// Yellow for > 4 seconds
+				lastSeenStyle = tcell.StyleDefault.Foreground(tcell.ColorYellow).Background(tcell.ColorBlack)
+			}
+		}
+
+		drawText(s, 0, row, colWidths[0], lastSeenStyle, lastSeenStr)
+
+		// Draw Count (second column)
+		countStr := fmt.Sprintf("%d", dev.Count)
+		drawText(s, colWidths[0], row, colWidths[1], normalStyle, countStr)
 
 		// Draw MAC address
-		drawText(s, colWidths[0], row, colWidths[1], normalStyle, dev.MacAddress)
+		drawText(s, colWidths[0]+colWidths[1], row, colWidths[2], normalStyle, dev.MacAddress)
 
 		// Draw Signal strength indicator
 		signalIndicator, signalColor := getSignalIndicator(dev.RSSI)
 		signalStyle := tcell.StyleDefault.Foreground(signalColor).Background(tcell.ColorBlack)
-		drawText(s, colWidths[0]+colWidths[1], row, colWidths[2], signalStyle, signalIndicator)
+		drawText(s, colWidths[0]+colWidths[1]+colWidths[2], row, colWidths[3], signalStyle, signalIndicator)
 
 		// Draw RSSI
-		drawText(s, colWidths[0]+colWidths[1]+colWidths[2], row, colWidths[3], normalStyle, fmt.Sprintf("%d", dev.RSSI))
+		drawText(s, colWidths[0]+colWidths[1]+colWidths[2]+colWidths[3], row, colWidths[4], normalStyle, fmt.Sprintf("%d", dev.RSSI))
 
 		// Draw Location (averaged from highest RSSI's geo data)
 		locationStr := ""
@@ -264,15 +287,15 @@ func drawDeviceTable(s tcell.Screen, devices []*BLEDevice, colWidths []int, titl
 				locationStr = fmt.Sprintf("%.5f, %.5f", loc.Latitude, loc.Longitude)
 			}
 		}
-		drawText(s, colWidths[0]+colWidths[1]+colWidths[2]+colWidths[3], row, colWidths[4], normalStyle, locationStr)
+		drawText(s, colWidths[0]+colWidths[1]+colWidths[2]+colWidths[3]+colWidths[4], row, colWidths[5], normalStyle, locationStr)
 
 		// Draw device name
-		drawText(s, colWidths[0]+colWidths[1]+colWidths[2]+colWidths[3]+colWidths[4], row, colWidths[5], normalStyle, dev.DeviceName)
+		drawText(s, colWidths[0]+colWidths[1]+colWidths[2]+colWidths[3]+colWidths[4]+colWidths[5], row, colWidths[6], normalStyle, dev.DeviceName)
 
 		// Draw service UUIDs (multi-line with ellipsis support) - now fixed width at 38 chars
-		uuidCol := colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3] + colWidths[4] + colWidths[5]
+		uuidCol := colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3] + colWidths[4] + colWidths[5] + colWidths[6]
 		if len(dev.ServiceUUIDs) == 0 {
-			drawText(s, uuidCol, row, colWidths[6], normalStyle, "")
+			drawText(s, uuidCol, row, colWidths[7], normalStyle, "")
 		} else {
 			for j, uuid := range dev.ServiceUUIDs {
 				if row+j >= maxRow {
@@ -280,10 +303,10 @@ func drawDeviceTable(s tcell.Screen, devices []*BLEDevice, colWidths []int, titl
 				}
 				// Ellipsize if UUID is longer than column width
 				displayUUID := uuid
-				if len(uuid) > colWidths[6] && colWidths[6] > 3 {
-					displayUUID = uuid[:colWidths[6]-3] + "..."
+				if len(uuid) > colWidths[7] && colWidths[7] > 3 {
+					displayUUID = uuid[:colWidths[7]-3] + "..."
 				}
-				drawText(s, uuidCol, row+j, colWidths[6], normalStyle, displayUUID)
+				drawText(s, uuidCol, row+j, colWidths[7], normalStyle, displayUUID)
 			}
 		}
 
@@ -292,11 +315,11 @@ func drawDeviceTable(s tcell.Screen, devices []*BLEDevice, colWidths []int, titl
 		if dev.MfrCode != 0 {
 			mfrCodeStr = fmt.Sprintf("%d", dev.MfrCode)
 		}
-		drawText(s, colWidths[0]+colWidths[1]+colWidths[2]+colWidths[3]+colWidths[4]+colWidths[5]+colWidths[6], row, colWidths[7], normalStyle, mfrCodeStr)
+		drawText(s, colWidths[0]+colWidths[1]+colWidths[2]+colWidths[3]+colWidths[4]+colWidths[5]+colWidths[6]+colWidths[7], row, colWidths[8], normalStyle, mfrCodeStr)
 
 		// Draw Mfr Data (variable width - fills remaining space)
-		mfrDataCol := colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3] + colWidths[4] + colWidths[5] + colWidths[6] + colWidths[7]
-		drawText(s, mfrDataCol, row, colWidths[8], normalStyle, dev.MfrData)
+		mfrDataCol := colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3] + colWidths[4] + colWidths[5] + colWidths[6] + colWidths[7] + colWidths[8]
+		drawText(s, mfrDataCol, row, colWidths[9], normalStyle, dev.MfrData)
 
 		row += uuidLines
 	}
