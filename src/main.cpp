@@ -32,7 +32,9 @@ namespace lookup {
     private:
         // Your strings - replace with actual values
         static constexpr const char* entries_[] = {
-            "0xfe0f"    // Phillips Lighting
+            "0xfe07",   // Sonos
+            "0xfe0f",    // Phillips Lighting
+            "0xfeb9"
         };
 
         static constexpr uint8_t size_ = std::size(entries_);
@@ -130,6 +132,7 @@ void reportDevice(const NimBLEAdvertisedDevice* dev) {
     }
 
     auto [omit, serviceUuids] = getUUIDs(dev);
+    if (omit) return;
 
     const std::string mfrDataB64 = !mfrDataRaw.empty() ? Base64::encode(mfrDataRaw) : "";
 
