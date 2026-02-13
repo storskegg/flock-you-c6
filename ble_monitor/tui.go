@@ -443,9 +443,8 @@ func drawDisconnectionModal(s tcell.Screen, connState *ConnectionState) {
 			if y >= modalY && y < modalY+modalHeight && x >= modalX && x < modalX+modalWidth {
 				continue // Skip modal area
 			}
-			// Dim the background
-			mainc, combc, _, _ := s.GetContent(x, y)
-			s.SetContent(x, y, mainc, combc, dimStyle)
+			// Dim the background by setting space with dim style
+			s.SetContent(x, y, ' ', nil, dimStyle)
 		}
 	}
 

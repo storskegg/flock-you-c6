@@ -19,7 +19,17 @@ func main() {
 	refreshRate := flag.Int("refresh", 4, "TUI refresh rate in updates per second (default: 4)")
 	gpsPort := flag.String("gps", "", "GPS/GNSS serial port device (e.g., /dev/ttyUSB1). If not specified, no GPS data collected.")
 	mergeKML := flag.Bool("merge-kml", false, "Merge KML files and exit. Provide KML files as remaining arguments.")
+	updateKML := flag.String("update-kml", "", "Update existing KML file with new features (styling, etc.) and save in place.")
 	flag.Parse()
+
+	// Handle update-kml mode (update and exit, no TUI)
+	if *updateKML != "" {
+		if err := updateKMLAndExit(*updateKML); err != nil {
+			fmt.Fprintf(os.Stderr, "Error updating KML file: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 
 	// Handle merge-kml mode (merge and exit, no TUI)
 	if *mergeKML {

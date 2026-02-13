@@ -91,6 +91,41 @@ func buildDeviceDescription(dev *BLEDevice) string {
 	return html.String()
 }
 
+// getMaxRSSI returns the maximum RSSI from a list of locations with their RSSIs
+func getMaxRSSI(locations []GeoLocation, dev *BLEDevice) int {
+	// Get max RSSI from the device's GeoData
+	dev.GeoData.mu.RLock()
+	defer dev.GeoData.mu.RUnlock()
+
+	if len(dev.GeoData.allRSSIs) == 0 {
+		return dev.RSSI // Fallback to current RSSI
+	}
+
+	return dev.GeoData.allRSSIs[0] // First element is highest (sorted descending)
+}
+
+// createRSSIStyles creates shared Style elements for RSSI-based coloring
+// Styles are generated as raw XML via generateStylesXML() for simplicity
+func createRSSIStyles() []kml.Element {
+	// Return empty - styles are added via generateStylesXML() as raw XML
+	return []kml.Element{}
+}
+
+// getStyleURLForRSSI returns the style URL reference for a given RSSI
+func getStyleURLForRSSI(rssi int) string {
+	if rssi > -50 {
+		return "#rssi-blue"
+	} else if rssi > -60 {
+		return "#rssi-green"
+	} else if rssi > -70 {
+		return "#rssi-yellow"
+	} else if rssi > -80 {
+		return "#rssi-orange"
+	} else {
+		return "#rssi-red"
+	}
+}
+
 // computeConvexHull computes the convex hull of a set of points using Graham scan
 // This ensures we only draw convex polygons even with 3+ points
 func computeConvexHull(points []GeoLocation) []GeoLocation {
@@ -378,31 +413,69 @@ func (a *Aggregator) ExportKML(filename string) error {
 		}
 
 		// 2. Path (if at least 2 locations across ALL RSSIs)
-		// Apply smoothing to reduce visual noise
+		// Create multi-segment paths, each segment colored by its RSSI
 		if len(allDeviceLocations) >= 2 {
 			smoothedPath := smoothPath(allDeviceLocations)
-			coords := make([]kml.Coordinate, len(smoothedPath))
-			for i, loc := range smoothedPath {
-				coords[i] = kml.Coordinate{
-					Lon: loc.Longitude,
-					Lat: loc.Latitude,
-					Alt: loc.Elevation,
-				}
+
+			// We need to create multi-segment paths
+			// Since we don't have RSSI per point, we'll sample from the device's RSSIs
+			// and create segments based on signal strength zones
+
+			// Get all RSSIs for this device to determine segment colors
+			dev.GeoData.mu.RLock()
+			allRSSIValues := make([]int, len(dev.GeoData.allRSSIs))
+			copy(allRSSIValues, dev.GeoData.allRSSIs)
+			dev.GeoData.mu.RUnlock()
+
+			// Create segments (approximate gradient by breaking path into colored pieces)
+			// We'll divide the path into segments and assign RSSI based on position
+			segmentCount := min(len(smoothedPath)-1, len(allRSSIValues))
+			if segmentCount < 1 {
+				segmentCount = len(smoothedPath) - 1
 			}
 
-			pathPlacemarks = append(pathPlacemarks, kml.Placemark(
-				kml.Name(dev.MacAddress),
-				kml.Description(description),
-				kml.LineString(
-					kml.Coordinates(coords...),
-				),
-			))
+			// Create one placemark per segment
+			for i := 0; i < len(smoothedPath)-1; i++ {
+				// Determine RSSI for this segment (interpolate through available RSSIs)
+				rssiIdx := (i * len(allRSSIValues)) / max(len(smoothedPath)-1, 1)
+				if rssiIdx >= len(allRSSIValues) {
+					rssiIdx = len(allRSSIValues) - 1
+				}
+				segmentRSSI := allRSSIValues[rssiIdx]
+
+				// Create a two-point line segment
+				segmentCoords := []kml.Coordinate{
+					{
+						Lon: smoothedPath[i].Longitude,
+						Lat: smoothedPath[i].Latitude,
+						Alt: smoothedPath[i].Elevation,
+					},
+					{
+						Lon: smoothedPath[i+1].Longitude,
+						Lat: smoothedPath[i+1].Latitude,
+						Alt: smoothedPath[i+1].Elevation,
+					},
+				}
+
+				pathPlacemarks = append(pathPlacemarks, kml.Placemark(
+					kml.Name(fmt.Sprintf("%s-seg%d", dev.MacAddress, i)),
+					kml.Description(description),
+					kml.StyleURL(getStyleURLForRSSI(segmentRSSI)),
+					kml.LineString(
+						kml.Coordinates(segmentCoords...),
+					),
+				))
+			}
 		}
 
 		// 3. Polygon (if at least 3 locations across ALL RSSIs)
+		// Color based on maximum RSSI
 		if len(allDeviceLocations) >= 3 {
 			// Compute convex hull to ensure we draw a proper polygon
 			hull := computeConvexHull(allDeviceLocations)
+
+			// Get max RSSI for coloring
+			maxRSSI := getMaxRSSI(allDeviceLocations, dev)
 
 			// Convert hull to coordinates (and close the polygon)
 			coords := make([]kml.Coordinate, len(hull)+1)
@@ -419,6 +492,7 @@ func (a *Aggregator) ExportKML(filename string) error {
 			polygonPlacemarks = append(polygonPlacemarks, kml.Placemark(
 				kml.Name(dev.MacAddress),
 				kml.Description(description),
+				kml.StyleURL(getStyleURLForRSSI(maxRSSI)),
 				kml.Polygon(
 					kml.OuterBoundaryIs(
 						kml.LinearRing(
@@ -434,6 +508,9 @@ func (a *Aggregator) ExportKML(filename string) error {
 	docElements := []kml.Element{
 		kml.Name(fmt.Sprintf("BLE Devices - %s", time.Now().Format("2006-01-02 15:04:05"))),
 	}
+
+	// Add shared styles for RSSI-based coloring
+	docElements = append(docElements, createRSSIStyles()...)
 
 	// Add Points folder
 	if len(pointPlacemarks) > 0 {
@@ -486,6 +563,147 @@ func (a *Aggregator) ExportKML(filename string) error {
 	}
 
 	return nil
+}
+
+// updateKMLAndExit updates an existing KML file with new features (styling, etc.)
+// Saves the result back to the same file
+func updateKMLAndExit(filePath string) error {
+	fmt.Printf("Updating KML file: %s\n", filePath)
+
+	// Check if file exists
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return fmt.Errorf("file does not exist: %s", filePath)
+	}
+
+	// Read and parse the existing KML
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to read file: %w", err)
+	}
+
+	kmlText := string(content)
+
+	// Extract placemarks from each folder
+	fmt.Println("Extracting placemarks...")
+	pointPlacemarks := extractPlacemarksFromFolder(kmlText, "Points")
+	pathPlacemarks := extractPlacemarksFromFolder(kmlText, "Paths")
+	polygonPlacemarks := extractPlacemarksFromFolder(kmlText, "Polygons")
+	sessionBoundaryPlacemarks := extractPlacemarksFromFolder(kmlText, "Session Boundary")
+
+	fmt.Printf("  Found %d points, %d paths, %d polygons, %d session boundaries\n",
+		len(pointPlacemarks), len(pathPlacemarks), len(polygonPlacemarks), len(sessionBoundaryPlacemarks))
+
+	// Update placemarks with styling
+	fmt.Println("Adding RSSI-based styling...")
+
+	// Update paths: extract RSSI and add styleUrl
+	styledPaths := make([]string, 0, len(pathPlacemarks))
+	for _, placemark := range pathPlacemarks {
+		rssi := extractRSSIFromPlacemark(placemark)
+		styled := addStyleURLToPlacemark(placemark, getStyleURLForRSSI(rssi))
+		styledPaths = append(styledPaths, styled)
+	}
+
+	// Update polygons: extract RSSI and add styleUrl
+	styledPolygons := make([]string, 0, len(polygonPlacemarks))
+	for _, placemark := range polygonPlacemarks {
+		rssi := extractRSSIFromPlacemark(placemark)
+		styled := addStyleURLToPlacemark(placemark, getStyleURLForRSSI(rssi))
+		styledPolygons = append(styledPolygons, styled)
+	}
+
+	// Extract all coordinates for potential session boundary recomputation
+	allCoords := extractAllCoordinates(kmlText)
+
+	fmt.Println("Writing updated KML...")
+
+	// Create backup
+	backupPath := filePath + ".backup"
+	if err := os.WriteFile(backupPath, content, 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Failed to create backup: %v\n", err)
+	} else {
+		fmt.Printf("  Created backup: %s\n", backupPath)
+	}
+
+	// Write updated KML back to original file
+	if err := writeMergedKML(filePath, pointPlacemarks, styledPaths, styledPolygons, allCoords); err != nil {
+		return fmt.Errorf("failed to write updated KML: %w", err)
+	}
+
+	fmt.Printf("✓ Updated KML saved to: %s\n", filePath)
+	fmt.Println("  • Added RSSI-based styling to paths and polygons")
+	fmt.Println("  • Added semi-transparent red style to session boundary")
+
+	return nil
+}
+
+// extractRSSIFromPlacemark extracts RSSI value from placemark CDATA description
+func extractRSSIFromPlacemark(placemark string) int {
+	// Look for <strong>RSSI:</strong> {value}
+	rssiTag := "<strong>RSSI:</strong>"
+	startIdx := strings.Index(placemark, rssiTag)
+	if startIdx == -1 {
+		return -100 // Default to very weak if not found
+	}
+
+	startIdx += len(rssiTag)
+
+	// Find the next </li> tag
+	endIdx := strings.Index(placemark[startIdx:], "</li>")
+	if endIdx == -1 {
+		return -100
+	}
+
+	rssiStr := strings.TrimSpace(placemark[startIdx : startIdx+endIdx])
+
+	var rssi int
+	if _, err := fmt.Sscanf(rssiStr, "%d", &rssi); err != nil {
+		return -100
+	}
+
+	return rssi
+}
+
+// addStyleURLToPlacemark adds or updates the styleUrl element in a placemark
+func addStyleURLToPlacemark(placemark, styleURL string) string {
+	// Check if styleUrl already exists
+	if strings.Contains(placemark, "<styleUrl>") {
+		// Replace existing styleUrl
+		startTag := "<styleUrl>"
+		endTag := "</styleUrl>"
+
+		startIdx := strings.Index(placemark, startTag)
+		if startIdx == -1 {
+			return placemark
+		}
+
+		endIdx := strings.Index(placemark[startIdx:], endTag)
+		if endIdx == -1 {
+			return placemark
+		}
+		endIdx += startIdx + len(endTag)
+
+		// Replace the styleUrl
+		before := placemark[:startIdx]
+		after := placemark[endIdx:]
+		return before + fmt.Sprintf("<styleUrl>%s</styleUrl>", styleURL) + after
+	}
+
+	// Add new styleUrl after <name> tag
+	nameEndTag := "</name>"
+	nameEndIdx := strings.Index(placemark, nameEndTag)
+	if nameEndIdx == -1 {
+		// No name tag, add after <Placemark>
+		placemarkStartIdx := strings.Index(placemark, "<Placemark>")
+		if placemarkStartIdx == -1 {
+			return placemark
+		}
+		insertIdx := placemarkStartIdx + len("<Placemark>")
+		return placemark[:insertIdx] + "\n      <styleUrl>" + styleURL + "</styleUrl>" + placemark[insertIdx:]
+	}
+
+	insertIdx := nameEndIdx + len(nameEndTag)
+	return placemark[:insertIdx] + "\n      <styleUrl>" + styleURL + "</styleUrl>" + placemark[insertIdx:]
 }
 
 // mergeKMLAndExit merges multiple KML files and writes the result
@@ -679,6 +897,9 @@ func writeMergedKML(outputPath string, points, paths, polygons []string, session
 	file.WriteString("\n  <Document>\n")
 	file.WriteString(fmt.Sprintf("    <name>BLE Devices - MERGED - %s</name>\n", time.Now().Format("2006-01-02 15:04:05")))
 
+	// Write shared styles
+	file.WriteString(generateStylesXML())
+
 	// Write Points folder
 	if len(points) > 0 {
 		file.WriteString("    <Folder>\n")
@@ -778,6 +999,35 @@ func findNonCollidingFilename(prefix, ext string) string {
 	return fmt.Sprintf("%s-%d%s", prefix, time.Now().Unix(), ext)
 }
 
+// generateStylesXML generates the XML for shared KML styles
+func generateStylesXML() string {
+	return `    <Style id="rssi-blue">
+      <LineStyle><color>ff0000ff</color><width>3</width></LineStyle>
+      <PolyStyle><color>ff0000ff</color></PolyStyle>
+    </Style>
+    <Style id="rssi-green">
+      <LineStyle><color>ff00ff00</color><width>3</width></LineStyle>
+      <PolyStyle><color>ff00ff00</color></PolyStyle>
+    </Style>
+    <Style id="rssi-yellow">
+      <LineStyle><color>ff00ffff</color><width>3</width></LineStyle>
+      <PolyStyle><color>ff00ffff</color></PolyStyle>
+    </Style>
+    <Style id="rssi-orange">
+      <LineStyle><color>ff0080ff</color><width>3</width></LineStyle>
+      <PolyStyle><color>ff0080ff</color></PolyStyle>
+    </Style>
+    <Style id="rssi-red">
+      <LineStyle><color>ffff0000</color><width>3</width></LineStyle>
+      <PolyStyle><color>ffff0000</color></PolyStyle>
+    </Style>
+    <Style id="session-boundary">
+      <LineStyle><color>80ff0000</color><width>4</width></LineStyle>
+      <PolyStyle><color>80ff0000</color></PolyStyle>
+    </Style>
+`
+}
+
 // createSessionBoundary creates a polygon representing the total session area
 // Uses the convex hull of all collected points from all devices
 func createSessionBoundary(allPoints []GeoLocation) kml.Element {
@@ -816,6 +1066,7 @@ func createSessionBoundary(allPoints []GeoLocation) kml.Element {
 	return kml.Placemark(
 		kml.Name("Session Area"),
 		kml.Description(description),
+		kml.StyleURL("#session-boundary"),
 		kml.Polygon(
 			kml.OuterBoundaryIs(
 				kml.LinearRing(
