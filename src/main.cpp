@@ -347,8 +347,8 @@ void setup() {
     cfg_antenna();
 
     Serial.begin(115200);
-    delay(500);
-    Serial.println(R"({"notification":"initializing..."})");
+    delay(1000);
+    Serial.println(R"({"notification":"Initializing..."})");
 
     // Create GNSS mutex
     gnssMutex = xSemaphoreCreateMutex();
@@ -377,21 +377,26 @@ void setup() {
             uint8_t ft = gnss.getFixType();
             gnssFixType.store(ft, std::memory_order_release);
 
+            GNSSState local = readGNSSFromModule();
+
+            Serial.printf("{\"notification\":\"GNSS fix PENDING, type=%u, siv=%u\"}\n",
+                              ft, local.siv);
+
             if (ft >= 2 && ft <= 3) {
-                GNSSState local = readGNSSFromModule();
                 gnssShared = local;  // no mutex needed yet (task not started)
 
                 syncRTC(local);
                 lastRtcSyncMs = millis();
 
-                Serial.printf("{\"notification\":\"GNSS fix acquired, type=%u, siv=%u\"}\n",
+                Serial.printf("{\"notification\":\"GNSS fix ACQUIRED, type=%u, siv=%u\"}\n",
                               ft, local.siv);
+
                 break;
             }
         }
 
         updateLED();
-        delay(200);
+        delay(500);
     }
 
     updateLED();
