@@ -12,3 +12,9 @@ report all detected BLE devices. I'll test it on those two flock safety cameras
 to see what their mac address prefixes are, UUID's, etc so that I can contribute
 potential new hardware back to the community.
 
+---
+
+- GNSS Board: https://www.sparkfun.com/sparkfun-gnss-receiver-sam-m8q-qwiic.html
+- Base Boards:
+  - Seeeduino XIAO ESP32C6
+  - Lonely Binary esp32-s3 DevKit Gold Edition
