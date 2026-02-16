@@ -6,6 +6,7 @@
 #include <FastLED.h>
 #include <sys/time.h>
 #include <atomic>
+#include <esp_task_wdt.h>
 
 // BLE scanning
 #define BLE_SCAN_DURATION 5      // seconds per scan
@@ -364,34 +365,44 @@ void setup() {
 
     gnss.setUART1Output(COM_TYPE_UBX);
     gnss.setNavigationFrequency(1);
-    gnss.setAutoPVT(true, false);
     gnss.saveConfigSelective(VAL_CFG_SUBSEC_IOPORT);
 
     Serial.println(R"({"notification":"GNSS initialized, waiting for fix..."})");
 
-    // Block until we acquire a spatial fix (2D or 3D)
+    // Block until we acquire a spatial fix (2D or 3D).
+    // Use polling mode here — getPVT() sends an explicit poll request and
+    // waits for the response.  Auto PVT is enabled later for the background task.
+    // A poll timeout means the UART link has degraded (not just "no fix yet").
+    uint8_t pvtTimeouts = 0;
     while (true) {
-        gnss.checkUblox();
-
         if (gnss.getPVT()) {
-            uint8_t ft = gnss.getFixType();
-            gnssFixType.store(ft, std::memory_order_release);
-
+            pvtTimeouts = 0;  // link is healthy
             GNSSState local = readGNSSFromModule();
+            gnssFixType.store(local.fixType, std::memory_order_release);
 
             Serial.printf("{\"notification\":\"GNSS fix PENDING, type=%u, siv=%u\"}\n",
-                              ft, local.siv);
+                              local.fixType, local.siv);
 
-            if (ft >= 2 && ft <= 3) {
+            if (local.fixType >= 2 && local.fixType <= 3) {
                 gnssShared = local;  // no mutex needed yet (task not started)
 
                 syncRTC(local);
                 lastRtcSyncMs = millis();
 
                 Serial.printf("{\"notification\":\"GNSS fix ACQUIRED, type=%u, siv=%u\"}\n",
-                              ft, local.siv);
+                              local.fixType, local.siv);
 
                 break;
+            }
+        } else {
+            pvtTimeouts++;
+            Serial.printf("{\"notification\":\"GNSS poll TIMEOUT (%u consecutive)\"}\n",
+                              pvtTimeouts);
+
+            if (pvtTimeouts >= 10) {
+                Serial.println(R"({"notification":"GNSS UART link FAILURE, re-initializing..."})");
+                gnss.begin(gnssSerial);
+                pvtTimeouts = 0;
             }
         }
 
@@ -400,6 +411,10 @@ void setup() {
     }
 
     updateLED();
+
+    // Enable auto PVT for the background GNSS task (implicitUpdate=false
+    // means the task must call checkUblox() before getPVT())
+    gnss.setAutoPVT(true, false);
 
     // Launch GNSS FreeRTOS task on core 1
     xTaskCreatePinnedToCore(
@@ -411,6 +426,11 @@ void setup() {
         nullptr,
         1
     );
+
+    // Remove core 0's idle task from the task watchdog.
+    // Core 0 is dedicated to NimBLE, which legitimately saturates the CPU
+    // during active scanning — IDLE0 starvation is expected, not a fault.
+    esp_task_wdt_delete(xTaskGetIdleTaskHandleForCPU(0));
 
     // Initialize BLE (NimBLE host runs on core 0)
     NimBLEDevice::init("");
