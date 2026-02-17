@@ -28,6 +28,12 @@ type Message struct {
 	MfrData      string   `json:"mfr_data,omitempty"`
 	DeviceName   string   `json:"device_name,omitempty"`
 	ServiceUUIDs []string `json:"service_uuids,omitempty"`
+	Lat          float64  `json:"lat,omitempty"`
+	Lon          float64  `json:"lon,omitempty"`
+	Fix          int      `json:"fix,omitempty"`
+	HAcc         uint32   `json:"h_acc,omitempty"`  // horizontal accuracy in millimeters
+	SIV          int      `json:"siv,omitempty"`    // satellites in view
+	Timestamp    string   `json:"timestamp,omitempty"` // ISO 8601 from firmware
 }
 
 // BLEDevice represents a Bluetooth LE device

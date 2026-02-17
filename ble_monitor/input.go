@@ -9,24 +9,24 @@ import (
 )
 
 // handleKeyboardEvent processes keyboard input
-func handleKeyboardEvent(ev *tcell.EventKey, agg *Aggregator, paused *bool, pauseMu *sync.RWMutex, tableState *TableState, connState *ConnectionState, locState *LocationState, exportModal *ExportModalState, s tcell.Screen) bool {
+func handleKeyboardEvent(ev *tcell.EventKey, agg *Aggregator, paused *bool, pauseMu *sync.RWMutex, tableState *TableState, connState *ConnectionState, exportModal *ExportModalState, s tcell.Screen) bool {
 	// Export modal has highest priority (if showing)
 	if exportModal.IsShowing() {
 		switch ev.Key() {
 		case tcell.KeyEsc:
 			// ESC closes modal
 			exportModal.Hide()
-			drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState, exportModal)
+			drawTable(s, agg.GetSorted(), *paused, tableState, connState, exportModal)
 			return false
 		case tcell.KeyUp:
 			// Up arrow - previous option
 			exportModal.SelectPrev()
-			drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState, exportModal)
+			drawTable(s, agg.GetSorted(), *paused, tableState, connState, exportModal)
 			return false
 		case tcell.KeyDown, tcell.KeyTab:
 			// Down arrow or Tab - next option
 			exportModal.SelectNext()
-			drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState, exportModal)
+			drawTable(s, agg.GetSorted(), *paused, tableState, connState, exportModal)
 			return false
 		case tcell.KeyEnter:
 			// Enter - execute selected option
@@ -37,7 +37,7 @@ func handleKeyboardEvent(ev *tcell.EventKey, agg *Aggregator, paused *bool, paus
 			} else {
 				handleExportKML(agg)
 			}
-			drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState, exportModal)
+			drawTable(s, agg.GetSorted(), *paused, tableState, connState, exportModal)
 			return false
 		case tcell.KeyRune:
 			switch ev.Rune() {
@@ -45,31 +45,17 @@ func handleKeyboardEvent(ev *tcell.EventKey, agg *Aggregator, paused *bool, paus
 				// J key - export JSON directly
 				exportModal.Hide()
 				handleExport(agg)
-				drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState, exportModal)
+				drawTable(s, agg.GetSorted(), *paused, tableState, connState, exportModal)
 				return false
 			case 'k', 'K':
 				// K key - export KML directly
 				exportModal.Hide()
 				handleExportKML(agg)
-				drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState, exportModal)
+				drawTable(s, agg.GetSorted(), *paused, tableState, connState, exportModal)
 				return false
 			}
 		}
 		// Consume any other keys when modal is showing
-		return false
-	}
-
-	// If GPS failure modal is showing, any key dismisses it
-	if locState.ShouldShowGPSFailureModal() {
-		locState.DismissGPSFailure()
-		drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState, exportModal)
-		return false
-	}
-
-	// If GPS reconnection modal is showing, any key dismisses it
-	if locState.ShouldShowGPSReconnectModal() {
-		locState.DismissGPSReconnect()
-		drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState, exportModal)
 		return false
 	}
 
@@ -81,39 +67,39 @@ func handleKeyboardEvent(ev *tcell.EventKey, agg *Aggregator, paused *bool, paus
 		case 'e', 'E':
 			// Show export modal instead of exporting directly
 			exportModal.Show()
-			drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState, exportModal)
+			drawTable(s, agg.GetSorted(), *paused, tableState, connState, exportModal)
 		case 'c', 'C':
-			handleClear(agg, tableState, paused, s, connState, locState, exportModal)
+			handleClear(agg, tableState, paused, s, connState, exportModal)
 		case 'p', 'P':
 			handlePause(paused, pauseMu)
 		case 'j', 'J': // Scroll down (vim-style)
 			handleScrollDown(tableState)
-			drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState, exportModal)
+			drawTable(s, agg.GetSorted(), *paused, tableState, connState, exportModal)
 		case 'k', 'K': // Scroll up (vim-style)
 			handleScrollUp(tableState)
-			drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState, exportModal)
+			drawTable(s, agg.GetSorted(), *paused, tableState, connState, exportModal)
 		}
 	case tcell.KeyUp:
 		handleScrollUp(tableState)
-		drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState, exportModal)
+		drawTable(s, agg.GetSorted(), *paused, tableState, connState, exportModal)
 	case tcell.KeyDown:
 		handleScrollDown(tableState)
-		drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState, exportModal)
+		drawTable(s, agg.GetSorted(), *paused, tableState, connState, exportModal)
 	case tcell.KeyPgUp:
 		handlePageUp(tableState)
-		drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState, exportModal)
+		drawTable(s, agg.GetSorted(), *paused, tableState, connState, exportModal)
 	case tcell.KeyPgDn:
 		handlePageDown(tableState)
-		drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState, exportModal)
+		drawTable(s, agg.GetSorted(), *paused, tableState, connState, exportModal)
 	case tcell.KeyHome:
 		handleHome(tableState)
-		drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState, exportModal)
+		drawTable(s, agg.GetSorted(), *paused, tableState, connState, exportModal)
 	case tcell.KeyEnd:
 		handleEnd(tableState, agg)
-		drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState, exportModal)
+		drawTable(s, agg.GetSorted(), *paused, tableState, connState, exportModal)
 	case tcell.KeyTab:
 		handleTabSwitch(tableState)
-		drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState, exportModal)
+		drawTable(s, agg.GetSorted(), *paused, tableState, connState, exportModal)
 	case tcell.KeyCtrlC:
 		return true // Signal quit
 	}
@@ -137,11 +123,11 @@ func handleExportKML(agg *Aggregator) {
 }
 
 // handleClear clears the aggregator and resets scroll positions
-func handleClear(agg *Aggregator, tableState *TableState, paused *bool, s tcell.Screen, connState *ConnectionState, locState *LocationState, exportModal *ExportModalState) {
+func handleClear(agg *Aggregator, tableState *TableState, paused *bool, s tcell.Screen, connState *ConnectionState, exportModal *ExportModalState) {
 	agg.Clear()
 	tableState.nearScrollOffset = 0
 	tableState.farScrollOffset = 0
-	drawTable(s, agg.GetSorted(), *paused, tableState, connState, locState, exportModal)
+	drawTable(s, agg.GetSorted(), *paused, tableState, connState, exportModal)
 }
 
 // handlePause toggles pause state
@@ -228,7 +214,7 @@ func handleTabSwitch(tableState *TableState) {
 }
 
 // handleMouseEvent processes mouse input
-func handleMouseEvent(ev *tcell.EventMouse, tableState *TableState, agg *Aggregator, paused bool, s tcell.Screen, connState *ConnectionState, locState *LocationState, exportModal *ExportModalState) {
+func handleMouseEvent(ev *tcell.EventMouse, tableState *TableState, agg *Aggregator, paused bool, s tcell.Screen, connState *ConnectionState, exportModal *ExportModalState) {
 	_, y := ev.Position()
 	buttons := ev.Buttons()
 
@@ -249,7 +235,7 @@ func handleMouseEvent(ev *tcell.EventMouse, tableState *TableState, agg *Aggrega
 				tableState.farScrollOffset = 0
 			}
 		}
-		drawTable(s, agg.GetSorted(), paused, tableState, connState, locState, exportModal)
+		drawTable(s, agg.GetSorted(), paused, tableState, connState, exportModal)
 	} else if buttons&tcell.WheelDown != 0 {
 		// Scroll down
 		if y < midPoint && tableState.focusedTable == "near" {
@@ -257,15 +243,15 @@ func handleMouseEvent(ev *tcell.EventMouse, tableState *TableState, agg *Aggrega
 		} else if y >= midPoint && tableState.focusedTable == "far" {
 			tableState.farScrollOffset++
 		}
-		drawTable(s, agg.GetSorted(), paused, tableState, connState, locState, exportModal)
+		drawTable(s, agg.GetSorted(), paused, tableState, connState, exportModal)
 	}
 }
 
 // handleResizeEvent processes terminal resize events
-func handleResizeEvent(s tcell.Screen, agg *Aggregator, paused *bool, pauseMu *sync.RWMutex, tableState *TableState, connState *ConnectionState, locState *LocationState, exportModal *ExportModalState) {
+func handleResizeEvent(s tcell.Screen, agg *Aggregator, paused *bool, pauseMu *sync.RWMutex, tableState *TableState, connState *ConnectionState, exportModal *ExportModalState) {
 	s.Sync()
 	pauseMu.RLock()
 	isPaused := *paused
 	pauseMu.RUnlock()
-	drawTable(s, agg.GetSorted(), isPaused, tableState, connState, locState, exportModal)
+	drawTable(s, agg.GetSorted(), isPaused, tableState, connState, exportModal)
 }

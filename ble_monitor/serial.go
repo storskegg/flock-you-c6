@@ -12,6 +12,15 @@ import (
 	"go.bug.st/serial"
 )
 
+// parseISO8601 parses an ISO 8601 timestamp from the firmware (e.g. "2026-02-16T18:08:32Z")
+func parseISO8601(s string) time.Time {
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Now().UTC()
+	}
+	return t
+}
+
 // ConnectionState tracks serial connection status
 type ConnectionState struct {
 	mu            sync.RWMutex
@@ -68,15 +77,21 @@ func openSerialPort(portPath string, baudRate int) (io.ReadCloser, error) {
 
 // readSerial reads from reader and processes lines, with automatic reconnection for serial ports
 // Reconnection attempts continue indefinitely with exponential backoff until success or app quit
-func readSerial(portPath string, baudRate int, agg *Aggregator, paused *bool, pauseMu *sync.RWMutex, connState *ConnectionState, locState *LocationState, done <-chan struct{}) {
+func readSerial(portPath string, baudRate int, agg *Aggregator, paused *bool, pauseMu *sync.RWMutex, connState *ConnectionState, done <-chan struct{}) {
 	var reader io.ReadCloser
 	var err error
 
-	// If portPath is empty, we're reading from stdin (no reconnection)
+	// If portPath is empty, try reading from stdin (only if piped, not a terminal)
 	if portPath == "" {
+		if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
+			// stdin is a terminal — don't read from it (conflicts with tcell)
+			connState.SetConnected(false)
+			<-done
+			return
+		}
 		reader = os.Stdin
 		connState.SetConnected(true)
-		readSerialLoop(reader, agg, paused, pauseMu, connState, locState, done)
+		readSerialLoop(reader, agg, paused, pauseMu, connState, done)
 		return
 	}
 
@@ -135,7 +150,7 @@ func readSerial(portPath string, baudRate int, agg *Aggregator, paused *bool, pa
 		playConnectedSound()
 
 		// Read from the port until error or done
-		err = readSerialLoop(reader, agg, paused, pauseMu, connState, locState, done)
+		err = readSerialLoop(reader, agg, paused, pauseMu, connState, done)
 
 		// Close the port
 		reader.Close()
@@ -163,7 +178,7 @@ func readSerial(portPath string, baudRate int, agg *Aggregator, paused *bool, pa
 }
 
 // readSerialLoop performs the actual reading and processing
-func readSerialLoop(reader io.ReadCloser, agg *Aggregator, paused *bool, pauseMu *sync.RWMutex, connState *ConnectionState, locState *LocationState, done <-chan struct{}) error {
+func readSerialLoop(reader io.ReadCloser, agg *Aggregator, paused *bool, pauseMu *sync.RWMutex, connState *ConnectionState, done <-chan struct{}) error {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024) // Increase buffer for large lines
 
@@ -176,7 +191,7 @@ func readSerialLoop(reader io.ReadCloser, agg *Aggregator, paused *bool, pauseMu
 				// Use Bytes() instead of Text() to avoid allocation
 				line := scanner.Bytes()
 				// Process immediately in this goroutine for minimal latency
-				processSerialLine(line, agg, paused, pauseMu, locState)
+				processSerialLine(line, agg, paused, pauseMu)
 			} else {
 				if err := scanner.Err(); err != nil {
 					// Scanner error (likely connection issue)
@@ -190,7 +205,7 @@ func readSerialLoop(reader io.ReadCloser, agg *Aggregator, paused *bool, pauseMu
 }
 
 // processSerialLine processes a single line of JSON
-func processSerialLine(line []byte, agg *Aggregator, paused *bool, pauseMu *sync.RWMutex, locState *LocationState) {
+func processSerialLine(line []byte, agg *Aggregator, paused *bool, pauseMu *sync.RWMutex) {
 	// Check if paused
 	pauseMu.RLock()
 	isPaused := *paused
@@ -228,12 +243,17 @@ func processSerialLine(line []byte, agg *Aggregator, paused *bool, pauseMu *sync
 		// Add or update the device in the aggregator
 		agg.AddOrUpdate(device)
 
-		// Now push current GPS location to the stored device (after it's been added/updated)
-		if currentLoc := locState.GetCurrent(); currentLoc != nil {
-			// Get the device from aggregator to push location to the actual stored instance
+		// Push firmware GNSS location to the stored device (only if spatial fix)
+		if msg.Fix >= 2 && msg.Fix <= 3 {
+			loc := GeoLocation{
+				Latitude:  msg.Lat,
+				Longitude: msg.Lon,
+				Accuracy:  float64(msg.HAcc) / 1000.0, // mm to meters
+				Timestamp: parseISO8601(msg.Timestamp),
+			}
 			agg.mu.Lock()
 			if storedDev, exists := agg.devices[msg.MacAddress]; exists && storedDev.GeoData != nil {
-				storedDev.GeoData.Push(msg.RSSI, *currentLoc)
+				storedDev.GeoData.Push(msg.RSSI, loc)
 			}
 			agg.mu.Unlock()
 		}

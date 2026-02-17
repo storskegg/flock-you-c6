@@ -65,7 +65,7 @@ func (e *ExportModalState) GetSelected() int {
 }
 
 // drawTable renders near devices, far devices, and special manufacturer tables to the screen
-func drawTable(s tcell.Screen, sorted *SortedDevices, paused bool, state *TableState, connState *ConnectionState, locState *LocationState, exportModal *ExportModalState) {
+func drawTable(s tcell.Screen, sorted *SortedDevices, paused bool, state *TableState, connState *ConnectionState, exportModal *ExportModalState) {
 	s.Clear()
 	width, height := s.Size()
 
@@ -117,26 +117,6 @@ func drawTable(s tcell.Screen, sorted *SortedDevices, paused bool, state *TableS
 		}
 	}
 
-	// Add GPS status
-	gpsStatus, fixQuality, satellites, satellitesInView, _ := locState.GetStatus()
-	switch gpsStatus {
-	case "detecting":
-		statusText += " | GPS: Detecting..."
-	case "failed":
-		statusText += " | GPS: FAILED"
-	case "no_fix":
-		// Always show satellite counts
-		statusText += fmt.Sprintf(" | GPS: No Fix (%d / %d)", satellitesInView, satellites)
-	case "fix":
-		if currentLoc := locState.GetCurrent(); currentLoc != nil {
-			statusText += fmt.Sprintf(" | GPS: Fix (%.4f, %.4f) Q:%d %d / %d",
-				currentLoc.Latitude, currentLoc.Longitude, fixQuality, satellitesInView, satellites)
-		} else {
-			statusText += fmt.Sprintf(" | GPS: Fix Q:%d %d / %d", fixQuality, satellitesInView, satellites)
-		}
-		// "no_gps" status - don't show anything
-	}
-
 	// Add focus indicator and scroll position
 	if state.focusedTable == "near" {
 		statusText += fmt.Sprintf(" | Focus: RECENT (row %d-%d of %d)",
@@ -163,16 +143,6 @@ func drawTable(s tcell.Screen, sorted *SortedDevices, paused bool, state *TableS
 	// Draw disconnection modal overlay if not connected
 	if !connected {
 		drawDisconnectionModal(s, connState)
-	}
-
-	// Draw GPS failure modal if GPS detection failed and not dismissed
-	if locState.ShouldShowGPSFailureModal() {
-		drawGPSFailureModal(s)
-	}
-
-	// Draw GPS reconnection modal if GPS is reconnecting and not dismissed
-	if locState.ShouldShowGPSReconnectModal() {
-		drawGPSReconnectionModal(s, locState)
 	}
 
 	// Draw export modal if showing
@@ -504,124 +474,6 @@ func drawCenteredText(s tcell.Screen, x, y, width int, style tcell.Style, text s
 			s.SetContent(textX+i, y, ch, nil, style)
 		}
 	}
-}
-
-// drawGPSFailureModal draws a yellow-background modal when GPS auto-detection fails
-func drawGPSFailureModal(s tcell.Screen) {
-	width, height := s.Size()
-
-	// Modal dimensions
-	modalWidth := 60
-	modalHeight := 7
-	modalX := (width - modalWidth) / 2
-	modalY := (height - modalHeight) / 2
-
-	// Styles
-	borderStyle := tcell.StyleDefault.Foreground(tcell.ColorBlack).Background(tcell.ColorYellow).Bold(true)
-	bgStyle := tcell.StyleDefault.Foreground(tcell.ColorBlack).Background(tcell.ColorYellow)
-	textStyle := tcell.StyleDefault.Foreground(tcell.ColorBlack).Background(tcell.ColorYellow)
-
-	// Draw modal background
-	for y := modalY; y < modalY+modalHeight; y++ {
-		for x := modalX; x < modalX+modalWidth; x++ {
-			s.SetContent(x, y, ' ', nil, bgStyle)
-		}
-	}
-
-	// Draw border
-	// Top and bottom borders
-	for x := modalX; x < modalX+modalWidth; x++ {
-		s.SetContent(x, modalY, '═', nil, borderStyle)
-		s.SetContent(x, modalY+modalHeight-1, '═', nil, borderStyle)
-	}
-	// Side borders
-	for y := modalY; y < modalY+modalHeight; y++ {
-		s.SetContent(modalX, y, '║', nil, borderStyle)
-		s.SetContent(modalX+modalWidth-1, y, '║', nil, borderStyle)
-	}
-	// Corners
-	s.SetContent(modalX, modalY, '╔', nil, borderStyle)
-	s.SetContent(modalX+modalWidth-1, modalY, '╗', nil, borderStyle)
-	s.SetContent(modalX, modalY+modalHeight-1, '╚', nil, borderStyle)
-	s.SetContent(modalX+modalWidth-1, modalY+modalHeight-1, '╝', nil, borderStyle)
-
-	// Draw title
-	title := " GPS AUTO-DETECTION FAILED "
-	titleX := modalX + (modalWidth-len(title))/2
-	for i, ch := range title {
-		s.SetContent(titleX+i, modalY+1, ch, nil, borderStyle)
-	}
-
-	// Draw message
-	line1 := "Could not detect GPS device baud rate."
-	line2 := "Operating without GPS data."
-	line3 := "Press any key to dismiss."
-
-	drawCenteredText(s, modalX, modalY+3, modalWidth, textStyle, line1)
-	drawCenteredText(s, modalX, modalY+4, modalWidth, textStyle, line2)
-	drawCenteredText(s, modalX, modalY+5, modalWidth, textStyle, line3)
-}
-
-// drawGPSReconnectionModal draws an orange-background modal when GPS is reconnecting
-func drawGPSReconnectionModal(s tcell.Screen, locState *LocationState) {
-	width, height := s.Size()
-
-	// Modal dimensions
-	modalWidth := 60
-	modalHeight := 8
-	modalX := (width - modalWidth) / 2
-	modalY := (height - modalHeight) / 2
-
-	// Get reconnection info
-	attempts, elapsed := locState.GetGPSReconnectInfo()
-	elapsed = elapsed.Round(time.Second)
-
-	// Styles
-	borderStyle := tcell.StyleDefault.Foreground(tcell.ColorBlack).Background(tcell.ColorOrange).Bold(true)
-	bgStyle := tcell.StyleDefault.Foreground(tcell.ColorBlack).Background(tcell.ColorOrange)
-	textStyle := tcell.StyleDefault.Foreground(tcell.ColorBlack).Background(tcell.ColorOrange)
-
-	// Draw modal background
-	for y := modalY; y < modalY+modalHeight; y++ {
-		for x := modalX; x < modalX+modalWidth; x++ {
-			s.SetContent(x, y, ' ', nil, bgStyle)
-		}
-	}
-
-	// Draw border
-	// Top and bottom borders
-	for x := modalX; x < modalX+modalWidth; x++ {
-		s.SetContent(x, modalY, '═', nil, borderStyle)
-		s.SetContent(x, modalY+modalHeight-1, '═', nil, borderStyle)
-	}
-	// Side borders
-	for y := modalY; y < modalY+modalHeight; y++ {
-		s.SetContent(modalX, y, '║', nil, borderStyle)
-		s.SetContent(modalX+modalWidth-1, y, '║', nil, borderStyle)
-	}
-	// Corners
-	s.SetContent(modalX, modalY, '╔', nil, borderStyle)
-	s.SetContent(modalX+modalWidth-1, modalY, '╗', nil, borderStyle)
-	s.SetContent(modalX, modalY+modalHeight-1, '╚', nil, borderStyle)
-	s.SetContent(modalX+modalWidth-1, modalY+modalHeight-1, '╝', nil, borderStyle)
-
-	// Draw title
-	title := " GPS CONNECTION LOST "
-	titleX := modalX + (modalWidth-len(title))/2
-	for i, ch := range title {
-		s.SetContent(titleX+i, modalY+1, ch, nil, borderStyle)
-	}
-
-	// Draw status text
-	line1 := "GPS connection interrupted!"
-	line2 := fmt.Sprintf("Reconnection attempt: %d", attempts)
-	line3 := fmt.Sprintf("Time since disconnect: %v", elapsed)
-	line4 := "Press any key to dismiss."
-
-	drawCenteredText(s, modalX, modalY+3, modalWidth, textStyle, line1)
-	drawCenteredText(s, modalX, modalY+4, modalWidth, textStyle, line2)
-	drawCenteredText(s, modalX, modalY+5, modalWidth, textStyle, line3)
-	drawCenteredText(s, modalX, modalY+6, modalWidth, textStyle, line4)
 }
 
 // drawExportModal draws the export options modal

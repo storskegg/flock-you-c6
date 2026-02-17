@@ -17,7 +17,6 @@ func main() {
 	serialPort := flag.String("port", "", "Serial port device (e.g., /dev/ttyUSB0). If not specified, reads from stdin.")
 	baudRate := flag.Int("baud", 115200, "Baud rate for serial port (default: 115200)")
 	refreshRate := flag.Int("refresh", 4, "TUI refresh rate in updates per second (default: 4)")
-	gpsPort := flag.String("gps", "", "GPS/GNSS serial port device (e.g., /dev/ttyUSB1). If not specified, no GPS data collected.")
 	mergeKML := flag.Bool("merge-kml", false, "Merge KML files and exit. Provide KML files as remaining arguments.")
 	updateKML := flag.String("update-kml", "", "Update existing KML file with new features (styling, etc.) and save in place.")
 	flag.Parse()
@@ -66,16 +65,8 @@ func main() {
 		connected: false,
 	}
 
-	// Initialize location state
-	locState := NewLocationState()
-
-	// Start GPS reading if -gps flag is provided
-	if *gpsPort != "" {
-		go readGPS(*gpsPort, locState, done)
-	}
-
 	// Start reading from input source (handles reconnection internally)
-	go readSerial(*serialPort, *baudRate, agg, &paused, &pauseMu, connState, locState, done)
+	go readSerial(*serialPort, *baudRate, agg, &paused, &pauseMu, connState, done)
 
 	// Initialize screen
 	s, err := tcell.NewScreen()
@@ -114,7 +105,7 @@ func main() {
 	defer ticker.Stop()
 
 	// Initial draw
-	drawTable(s, agg.GetSorted(), paused, tableState, connState, locState, exportModal)
+	drawTable(s, agg.GetSorted(), paused, tableState, connState, exportModal)
 
 	// Event loop
 	quit := false
@@ -124,7 +115,7 @@ func main() {
 			pauseMu.RLock()
 			isPaused := paused
 			pauseMu.RUnlock()
-			drawTable(s, agg.GetSorted(), isPaused, tableState, connState, locState, exportModal)
+			drawTable(s, agg.GetSorted(), isPaused, tableState, connState, exportModal)
 
 		case <-sigChan:
 			quit = true
@@ -135,13 +126,13 @@ func main() {
 				ev := s.PollEvent()
 				switch ev := ev.(type) {
 				case *tcell.EventKey:
-					if handleKeyboardEvent(ev, agg, &paused, &pauseMu, tableState, connState, locState, exportModal, s) {
+					if handleKeyboardEvent(ev, agg, &paused, &pauseMu, tableState, connState, exportModal, s) {
 						quit = true
 					}
 				case *tcell.EventMouse:
-					handleMouseEvent(ev, tableState, agg, paused, s, connState, locState, exportModal)
+					handleMouseEvent(ev, tableState, agg, paused, s, connState, exportModal)
 				case *tcell.EventResize:
-					handleResizeEvent(s, agg, &paused, &pauseMu, tableState, connState, locState, exportModal)
+					handleResizeEvent(s, agg, &paused, &pauseMu, tableState, connState, exportModal)
 				}
 			}
 			time.Sleep(10 * time.Millisecond)
